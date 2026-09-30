@@ -450,60 +450,7 @@ def detect_boxes(frame):
             panel_drop,
         )
 
-    # Dialogue evidence must exist inside the panel.
-    dialogue_search = (
-        int(round(width * 0.09)),
-        panel_top,
-        int(round(width * 0.84)),
-        height - panel_top,
-    )
-
-    dialogue_groups, dialogue_counts = active_row_groups(
-        mask,
-        dialogue_search,
-        min_white_pixels=max(
-            24,
-            int(round(width * 0.018)),
-        ),
-        max_gap_rows=max(
-            2,
-            int(round(height * 0.010)),
-        ),
-    )
-
-    if not dialogue_groups:
-        return (
-            mask,
-            None,
-            None,
-            panel_drop,
-        )
-
-    # Use all dialogue lines that are close enough vertically.
-    # Final dialogue box is the WHOLE panel down to the bottom,
-    # so long dialogue can never be clipped.
-    dialogue_group = (
-        dialogue_groups[0][0],
-        dialogue_groups[-1][1],
-    )
-
-    dialogue_text_box = text_box_from_group(
-        frame,
-        mask,
-        dialogue_search,
-        dialogue_group,
-        pad_x_ratio=0.02,
-        pad_y_ratio=0.01,
-    )
-
-    if dialogue_text_box is None:
-        return (
-            mask,
-            None,
-            None,
-            panel_drop,
-        )
-
+    # Dialogue box is the entire bottom panel.
     dialogue_box = (
         0,
         panel_top,
@@ -511,38 +458,47 @@ def detect_boxes(frame):
         height - panel_top,
     )
 
-    # Name must exist directly above the panel, on the left.
-    name_height = int(round(
-        height * 0.12
-    ))
+    # Character-name panel location is effectively fixed relative
+    # to the dialogue panel. Do NOT search the whole upper-left area.
+    name_x1 = int(round(width * 0.035))
+    name_x2 = int(round(width * 0.185))
 
-    name_search = (
-        int(round(width * 0.02)),
-        max(
-            0,
-            panel_top - name_height,
-        ),
-        int(round(width * 0.26)),
-        min(
-            name_height,
-            panel_top,
-        ),
+    name_y2 = panel_top - int(round(height * 0.012))
+    name_y1 = name_y2 - int(round(height * 0.075))
+
+    name_y1 = max(0, name_y1)
+    name_y2 = max(name_y1 + 1, name_y2)
+
+    fixed_name_box = (
+        name_x1,
+        name_y1,
+        name_x2 - name_x1,
+        name_y2 - name_y1,
     )
 
-    name_groups, name_counts = active_row_groups(
-        mask,
-        name_search,
-        min_white_pixels=max(
-            8,
-            int(round(width * 0.004)),
-        ),
-        max_gap_rows=max(
-            2,
-            int(round(height * 0.006)),
-        ),
+    # Validate that name text really exists inside the fixed name panel.
+    nx, ny, nw, nh = fixed_name_box
+    name_region = mask[
+        ny : ny + nh,
+        nx : nx + nw,
+    ]
+
+    name_white_pixels = int(
+        np.count_nonzero(
+            name_region
+        )
     )
 
-    if not name_groups:
+    name_min_pixels = max(
+        30,
+        int(round(
+            width
+            * height
+            * 0.00006
+        )),
+    )
+
+    if name_white_pixels < name_min_pixels:
         return (
             mask,
             None,
@@ -550,34 +506,28 @@ def detect_boxes(frame):
             panel_drop,
         )
 
-    # The actual character name is one compact row nearest the panel.
-    name_group = max(
-        name_groups,
-        key=lambda group: group[1],
-    )
+    # Validate dialogue text inside the bottom panel as well.
+    dialogue_text_region = mask[
+        panel_top:height,
+        int(round(width * 0.08)) : int(round(width * 0.94)),
+    ]
 
-    name_box = text_box_from_group(
-        frame,
-        mask,
-        name_search,
-        name_group,
-        pad_x_ratio=0.012,
-        pad_y_ratio=0.010,
-    )
-
-    if name_box is None:
-        return (
-            mask,
-            None,
-            None,
-            panel_drop,
+    dialogue_white_pixels = int(
+        np.count_nonzero(
+            dialogue_text_region
         )
+    )
 
-    # Hard relation: name box must be completely above dialogue panel.
-    if (
-        name_box[1] + name_box[3]
-        > panel_top
-    ):
+    dialogue_min_pixels = max(
+        120,
+        int(round(
+            width
+            * height
+            * 0.00020
+        )),
+    )
+
+    if dialogue_white_pixels < dialogue_min_pixels:
         return (
             mask,
             None,
@@ -587,11 +537,10 @@ def detect_boxes(frame):
 
     return (
         mask,
-        name_box,
+        fixed_name_box,
         dialogue_box,
         panel_drop,
     )
-
 
 def prepare_ocr_image(crop_bgr):
     gray = cv2.cvtColor(
