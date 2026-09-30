@@ -6,7 +6,7 @@ Heaven Burns Red YouTube 영상에서 화면의 화자명/대사를 시간축으
 
 현재 범위:
 
-- `yt-dlp`로 YouTube 영상 다운로드
+- `pytubefix`로 YouTube 영상 다운로드
 - `ffmpeg`로 영상 전체 오디오를 WAV로 추출
 - OpenCV 고정 ROI로 화자명/대사 영역 지정
 - 기존 일본어 OCR 실험과 동일하게 `MangaOCR` 사용
