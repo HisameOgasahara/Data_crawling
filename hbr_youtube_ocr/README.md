@@ -1,42 +1,63 @@
 # HBR YouTube OCR
 
-Heaven Burns Red 영상에서 화면의 화자명/대사를 시간축으로 추출하는 실험입니다.
+Heaven Burns Red 영상에서 화자명/대사를 시간축으로 추출하는 실험입니다.
 
 ## Colab
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/HisameOgasahara/Data_crawling/blob/main/hbr_youtube_ocr/hbr_youtube_ocr_colab.ipynb?skip_cache=true)
 
-- YouTube / 로컬 업로드 / Google Drive 영상 입력
-- 전체 WAV 오디오 추출
-- OpenCV 고정 ROI
-- MangaOCR
-- 화자명/대사 timestamp 매칭
+## Local fixed-ROI OCR
 
-## Local ROI / OCR test
+자동 ROI 검출은 사용하지 않습니다.
 
-`local_roi_ocr.py`는 로컬 OpenCV 창에서 영상 전체를 보면서 ROI가 계속 같은 위치에 유지되는지 확인하기 위한 도구입니다.
+처음 한 번 영상에서 화자명 영역과 대사 영역을 수동으로 지정해 `roi.json`에 정규화 좌표로 저장하고, 이후 같은 UI 배치의 영상은 저장된 ROI를 그대로 사용합니다.
 
-실행:
+### 1. ROI 캘리브레이션
 
 ```bash
 pip install opencv-python manga-ocr pillow
-python local_roi_ocr.py "D:\\video\\hbr.mp4"
-```
-
-영상이 큰 경우 기본적으로 가로 1280px에 맞춰 축소해서 표시합니다. 원본 영상은 축소하지 않으며 OCR도 원본 해상도의 ROI를 사용합니다. speaker/dialogue ROI는 수동 지정하지 않고 OpenCV로 매 프레임 자동 검출합니다.
-
-```bash
-python local_roi_ocr.py "D:\\video\\hbr.mp4" --width 960
+python local_roi_ocr.py "D:\\video\\hbr.mp4" --mode calibrate --time 60
 ```
 
 키:
 
 - `Space`: 재생 / 일시정지
 - `a` / `d`: 이전 / 다음 1프레임
-- `j` / `l`: 5초 뒤 / 앞으로 이동
-- `1`: 현재 프레임에서 speaker ROI 지정
-- `2`: 현재 프레임에서 dialogue ROI 지정
-- `o`: 현재 프레임의 두 ROI만 MangaOCR 실행
+- `j` / `l`: 5초 뒤 / 앞으로
+- `r`: 현재 프레임에서 speaker ROI → dialogue ROI 순서로 선택하고 `roi.json` 저장
 - `q`: 종료
 
-OCR 모델은 시작할 때 로드하지 않고 처음 `o`를 눌렀을 때만 CPU로 로드합니다.
+ROI는 원본 해상도의 픽셀 좌표가 아니라 0~1 정규화 좌표로 저장되므로 동일한 UI 비율이면 다른 해상도에도 그대로 적용됩니다.
+
+### 2. 전체 영상 OCR
+
+```bash
+python local_roi_ocr.py "D:\\video\\hbr.mp4" --mode extract --interval 0.5
+```
+
+처리 순서:
+
+1. `roi.json` 로드
+2. 일정 시간 간격으로 프레임 샘플링
+3. speaker/dialogue ROI crop
+4. grayscale + threshold
+5. MangaOCR
+6. speaker OCR을 `character_names.txt`와 fuzzy match
+7. 같은 캐릭터의 연속된 유사 대사를 하나의 구간으로 병합
+8. 캐릭터별 TXT 저장
+
+출력:
+
+```text
+hbr_ocr_output/
+├── ocr_samples.csv
+├── dialogue_segments.csv
+└── characters/
+    ├── 茅森月歌.txt
+    ├── 和泉ユキ.txt
+    └── ...
+```
+
+기본 ROI 파일: `hbr_youtube_ocr/roi.json`
+
+기본 캐릭터 이름 파일: `hbr_youtube_ocr/character_names.txt`
