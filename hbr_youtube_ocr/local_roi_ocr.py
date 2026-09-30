@@ -16,8 +16,8 @@ WINDOW_NAME = "HBR ROI OCR"
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Preview HBR video, detect the fixed dialogue UI from white-text "
-            "color distribution in the lower screen, and run MangaOCR on demand."
+            "Detect the HBR bottom dialogue panel first, then find white speaker/dialogue "
+            "text only inside constrained regions."
         )
     )
     parser.add_argument("video", type=Path, help="Video file path")
@@ -142,7 +142,11 @@ def crop_from_box(frame, box):
         return None
 
     x, y, w, h = box
-    return frame[y : y + h, x : x + w]
+
+    return frame[
+        y : y + h,
+        x : x + w,
+    ]
 
 
 def draw_box(
@@ -182,7 +186,7 @@ def draw_box(
     )
 
 
-def clamp_box(box, frame):
+def clamp_box(frame, box):
     if box is None:
         return None
 
@@ -205,6 +209,28 @@ def clamp_box(box, frame):
     )
 
 
+def expand_box(
+    frame,
+    box,
+    pad_x,
+    pad_y,
+):
+    if box is None:
+        return None
+
+    x, y, w, h = box
+
+    return clamp_box(
+        frame,
+        (
+            x - pad_x,
+            y - pad_y,
+            w + 2 * pad_x,
+            h + 2 * pad_y,
+        ),
+    )
+
+
 def union_boxes(boxes):
     if not boxes:
         return None
@@ -222,37 +248,99 @@ def union_boxes(boxes):
     )
 
 
-def expand_box(
-    box,
-    frame,
-    pad_x_ratio,
-    pad_y_ratio,
-):
-    if box is None:
-        return None
-
+def detect_dialogue_panel(frame):
     height, width = frame.shape[:2]
-    pad_x = int(round(width * pad_x_ratio))
-    pad_y = int(round(height * pad_y_ratio))
 
-    x, y, w, h = box
-
-    return clamp_box(
-        (
-            x - pad_x,
-            y - pad_y,
-            w + 2 * pad_x,
-            h + 2 * pad_y,
-        ),
+    gray = cv2.cvtColor(
         frame,
+        cv2.COLOR_BGR2GRAY,
     )
 
+    gray = cv2.GaussianBlur(
+        gray,
+        (9, 9),
+        0,
+    )
 
-def make_white_text_mask(
-    frame,
-    saturation_max,
-    value_min,
-):
+    x1 = int(round(width * 0.02))
+    x2 = int(round(width * 0.98))
+
+    y_start = int(round(height * 0.52))
+    y_end = int(round(height * 0.82))
+
+    band = gray[
+        y_start:y_end,
+        x1:x2,
+    ].astype(np.float32)
+
+    vertical_radius = max(
+        4,
+        int(round(height * 0.006)),
+    )
+
+    best_y = None
+    best_score = -1.0
+
+    for local_y in range(
+        vertical_radius,
+        band.shape[0] - vertical_radius,
+    ):
+        above = band[
+            local_y - vertical_radius : local_y,
+            :
+        ].mean(axis=0)
+
+        below = band[
+            local_y : local_y + vertical_radius,
+            :
+        ].mean(axis=0)
+
+        dark_drop = above - below
+
+        broad_drop = np.clip(
+            dark_drop,
+            0.0,
+            None,
+        )
+
+        mean_drop = float(
+            np.mean(broad_drop)
+        )
+
+        coverage = float(
+            np.mean(
+                dark_drop > 5.0
+            )
+        )
+
+        score = (
+            mean_drop
+            * (0.35 + coverage)
+        )
+
+        if score > best_score:
+            best_score = score
+            best_y = y_start + local_y
+
+    if best_y is None:
+        return None, 0.0
+
+    if best_score < 1.8:
+        return None, best_score
+
+    panel_top = best_y
+
+    panel_box = (
+        0,
+        panel_top,
+        width,
+        height - panel_top,
+    )
+
+    return panel_box, best_score
+
+
+def make_white_text_mask(frame):
     hsv = cv2.cvtColor(
         frame,
         cv2.COLOR_BGR2HSV,
@@ -262,16 +350,16 @@ def make_white_text_mask(
     value = hsv[:, :, 2]
 
     mask = (
-        (saturation <= saturation_max)
-        & (value >= value_min)
+        (saturation <= 80)
+        & (value >= 185)
     ).astype(np.uint8) * 255
 
     return mask
 
 
-def find_text_lines(
+def find_line_boxes(
     frame,
-    mask,
+    white_mask,
     search_box,
     min_width_ratio,
     max_width_ratio,
@@ -281,22 +369,27 @@ def find_text_lines(
     height, width = frame.shape[:2]
 
     sx, sy, sw, sh = search_box
-    search_mask = mask[sy : sy + sh, sx : sx + sw]
 
-    close_width = max(
-        3,
-        int(round(width * 0.012)),
-    )
+    region = white_mask[
+        sy : sy + sh,
+        sx : sx + sw,
+    ]
 
-    close_kernel = cv2.getStructuringElement(
+    horizontal_kernel = cv2.getStructuringElement(
         cv2.MORPH_RECT,
-        (close_width, 3),
+        (
+            max(
+                5,
+                int(round(width * 0.010)),
+            ),
+            3,
+        ),
     )
 
     connected = cv2.morphologyEx(
-        search_mask,
+        region,
         cv2.MORPH_CLOSE,
-        close_kernel,
+        horizontal_kernel,
         iterations=2,
     )
 
@@ -309,7 +402,9 @@ def find_text_lines(
     boxes = []
 
     for contour in contours:
-        x, y, w, h = cv2.boundingRect(contour)
+        x, y, w, h = cv2.boundingRect(
+            contour
+        )
 
         width_ratio = w / width
         height_ratio = h / height
@@ -342,155 +437,101 @@ def find_text_lines(
     return boxes
 
 
-def estimate_thresholds_from_frame(frame):
-    height, width = frame.shape[:2]
-
-    y1 = int(round(height * 0.50))
-    lower = frame[y1:height, :]
-
-    hsv = cv2.cvtColor(
-        lower,
-        cv2.COLOR_BGR2HSV,
-    )
-
-    saturation = hsv[:, :, 1]
-    value = hsv[:, :, 2]
-
-    broad_white = (
-        (saturation <= 110)
-        & (value >= 170)
-    )
-
-    white_s = saturation[broad_white]
-    white_v = value[broad_white]
-
-    if len(white_s) < 100:
-        return 90, 190
-
-    saturation_max = int(
-        np.clip(
-            np.percentile(white_s, 92) + 10,
-            45,
-            120,
-        )
-    )
-
-    value_min = int(
-        np.clip(
-            np.percentile(white_v, 15) - 10,
-            160,
-            230,
-        )
-    )
-
-    return saturation_max, value_min
-
-
-def detect_hbr_text_regions(
+def detect_text_rois(
     frame,
-    saturation_max,
-    value_min,
+    panel_box,
 ):
+    if panel_box is None:
+        return (
+            None,
+            None,
+            None,
+        )
+
     height, width = frame.shape[:2]
 
-    mask = make_white_text_mask(
-        frame,
-        saturation_max,
-        value_min,
+    panel_x, panel_y, panel_w, panel_h = panel_box
+
+    white_mask = make_white_text_mask(
+        frame
     )
 
     dialogue_search = (
-        int(round(width * 0.05)),
-        int(round(height * 0.63)),
-        int(round(width * 0.90)),
-        int(round(height * 0.34)),
+        int(round(width * 0.08)),
+        panel_y + int(round(panel_h * 0.05)),
+        int(round(width * 0.84)),
+        int(round(panel_h * 0.88)),
     )
 
-    dialogue_lines = find_text_lines(
+    dialogue_lines = find_line_boxes(
         frame,
-        mask,
+        white_mask,
         dialogue_search,
-        min_width_ratio=0.18,
-        max_width_ratio=0.86,
+        min_width_ratio=0.06,
+        max_width_ratio=0.84,
         min_height_ratio=0.018,
-        max_height_ratio=0.080,
+        max_height_ratio=0.075,
     )
 
     dialogue_text_box = union_boxes(
         dialogue_lines
     )
 
-    if dialogue_text_box is None:
-        return None, None, None, None, mask
+    dialogue_roi = None
 
-    dialogue_roi = expand_box(
-        dialogue_text_box,
-        frame,
-        pad_x_ratio=0.025,
-        pad_y_ratio=0.020,
-    )
-
-    dialogue_panel = expand_box(
-        dialogue_text_box,
-        frame,
-        pad_x_ratio=0.115,
-        pad_y_ratio=0.075,
-    )
+    if dialogue_text_box is not None:
+        dialogue_roi = expand_box(
+            frame,
+            dialogue_text_box,
+            pad_x=int(round(width * 0.025)),
+            pad_y=int(round(height * 0.018)),
+        )
 
     name_search = (
-        int(round(width * 0.02)),
-        int(round(height * 0.50)),
-        int(round(width * 0.32)),
-        int(round(height * 0.25)),
+        int(round(width * 0.025)),
+        max(
+            0,
+            panel_y - int(round(height * 0.105)),
+        ),
+        int(round(width * 0.24)),
+        int(round(height * 0.125)),
     )
 
-    name_lines = find_text_lines(
+    name_lines = find_line_boxes(
         frame,
-        mask,
+        white_mask,
         name_search,
-        min_width_ratio=0.035,
-        max_width_ratio=0.22,
+        min_width_ratio=0.025,
+        max_width_ratio=0.20,
         min_height_ratio=0.018,
-        max_height_ratio=0.080,
+        max_height_ratio=0.070,
     )
 
-    name_text_box = None
+    speaker_text_box = None
 
     if name_lines:
-        dialogue_top = dialogue_text_box[1]
+        speaker_text_box = max(
+            name_lines,
+            key=lambda box: (
+                box[2]
+                * box[3]
+            ),
+        )
 
-        valid_name_lines = [
-            box
-            for box in name_lines
-            if box[1] < dialogue_top
-        ]
+    speaker_roi = None
 
-        if valid_name_lines:
-            name_text_box = max(
-                valid_name_lines,
-                key=lambda box: box[2] * box[3],
-            )
-
-    speaker_roi = expand_box(
-        name_text_box,
-        frame,
-        pad_x_ratio=0.018,
-        pad_y_ratio=0.012,
-    )
-
-    name_panel = expand_box(
-        name_text_box,
-        frame,
-        pad_x_ratio=0.035,
-        pad_y_ratio=0.022,
-    )
+    if speaker_text_box is not None:
+        speaker_roi = expand_box(
+            frame,
+            speaker_text_box,
+            pad_x=int(round(width * 0.018)),
+            pad_y=int(round(height * 0.012)),
+        )
 
     return (
-        name_panel,
-        dialogue_panel,
         speaker_roi,
         dialogue_roi,
-        mask,
+        white_mask,
     )
 
 
@@ -526,7 +567,9 @@ def main():
     args = parse_args()
 
     if not args.video.exists():
-        raise FileNotFoundError(args.video)
+        raise FileNotFoundError(
+            args.video
+        )
 
     known_names = load_name_list(
         args.names_file
@@ -565,9 +608,6 @@ def main():
     paused = not args.autoplay
     manga_ocr = None
 
-    saturation_max = 90
-    value_min = 190
-
     cv2.namedWindow(
         WINDOW_NAME,
         cv2.WINDOW_NORMAL,
@@ -590,28 +630,24 @@ def main():
                 frame = next_frame
 
         (
-            name_panel,
             dialogue_panel,
+            panel_score,
+        ) = detect_dialogue_panel(
+            frame
+        )
+
+        (
             speaker_roi,
             dialogue_roi,
-            text_mask,
-        ) = detect_hbr_text_regions(
+            white_mask,
+        ) = detect_text_rois(
             frame,
-            saturation_max,
-            value_min,
+            dialogue_panel,
         )
 
         display, scale = resize_for_display(
             frame,
             args.width,
-        )
-
-        draw_box(
-            display,
-            name_panel,
-            scale,
-            "name-panel",
-            (255, 255, 0),
         )
 
         draw_box(
@@ -659,7 +695,7 @@ def main():
             f"{current_sec:.2f}/{duration_sec:.2f}s  "
             f"frame {current_frame}/{max(frame_count - 1, 0)}  "
             f"{'PAUSE' if paused else 'PLAY'}  "
-            f"S<={saturation_max} V>={value_min}"
+            f"panel={panel_score:.2f}"
         )
 
         cv2.putText(
@@ -750,27 +786,10 @@ def main():
             ok, frame = cap.read()
             continue
 
-        if key == ord("c"):
-            paused = True
-
-            (
-                saturation_max,
-                value_min,
-            ) = estimate_thresholds_from_frame(
-                frame
-            )
-
-            print(
-                "calibrated:",
-                f"S <= {saturation_max},",
-                f"V >= {value_min}",
-            )
-            continue
-
         if key == ord("m"):
             cv2.imshow(
                 "white-text-mask",
-                text_mask,
+                white_mask,
             )
             continue
 
@@ -782,8 +801,8 @@ def main():
                 or dialogue_roi is None
             ):
                 print(
-                    "speaker/dialogue text region "
-                    "was not detected on this frame."
+                    "speaker/dialogue ROI was not detected "
+                    "inside the dialogue panel."
                 )
                 continue
 
@@ -849,31 +868,27 @@ def main():
                 f"[{current_sec:.2f}s]"
             )
             print(
-                "name panel   :",
-                name_panel,
-            )
-            print(
-                "dialogue pnl :",
+                "dialogue panel:",
                 dialogue_panel,
             )
             print(
-                "speaker roi  :",
+                "speaker roi   :",
                 speaker_roi,
             )
             print(
-                "dialogue roi :",
+                "dialogue roi  :",
                 dialogue_roi,
             )
             print(
-                "speaker raw  :",
+                "speaker raw   :",
                 speaker_text,
             )
             print(
-                f"speaker match: {matched_name} "
+                f"speaker match : {matched_name} "
                 f"(score={score:.2f})"
             )
             print(
-                "dialogue     :",
+                "dialogue      :",
                 dialogue_text,
             )
             continue
