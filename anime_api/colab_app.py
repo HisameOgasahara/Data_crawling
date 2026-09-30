@@ -61,6 +61,12 @@ video{width:100%;max-height:70vh;background:#000}
 </main>
 <script>
 let hls = null;
+let playToken = 0;
+
+const PROVIDERS = [
+  "anineko", "anizone", "anikoto", "reanime", "aniwaves",
+  "kaa", "anibd", "animegg", "mkissa", "animeonsen"
+];
 
 function titleOf(item){
   const t=item.title||{};
@@ -90,53 +96,100 @@ async function searchAnime(){
   status.textContent=(data.results||[]).length+"개 검색됨";
 }
 
+async function tryStream(data, token){
+  const streams=(data.streams||[]).filter(
+    s => s.type==="hls" || s.type==="mp4" || s.type==="dash" || String(s.url||"").includes(".m3u8")
+  );
+  if(!streams.length) return false;
+
+  const s=streams[0];
+  const video=document.getElementById("video");
+  const status=document.getElementById("status");
+
+  if(hls){hls.destroy();hls=null;}
+  video.removeAttribute("src");
+  video.load();
+
+  return await new Promise((resolve)=>{
+    let settled=false;
+    const finish=(ok)=>{
+      if(settled) return;
+      settled=true;
+      clearTimeout(timer);
+      resolve(ok);
+    };
+
+    const timer=setTimeout(()=>finish(false),12000);
+
+    video.onloadedmetadata=()=>{
+      if(token!==playToken) return finish(false);
+      status.textContent="재생 중 | provider: "+(data.provider||"?")+" | stream: "+(s.server||s.type||"?");
+      video.play().catch(()=>{});
+      finish(true);
+    };
+    video.onerror=()=>finish(false);
+
+    if(s.type==="hls" || String(s.url).includes(".m3u8")){
+      const referer=s.referer || new URL(s.url).origin + "/";
+      const playUrl="/proxy_m3u8?url="+encodeURIComponent(s.url)+"&referer="+encodeURIComponent(referer);
+
+      if(Hls.isSupported()){
+        hls=new Hls();
+        hls.on(Hls.Events.ERROR,(_event,err)=>{
+          if(err && err.fatal) finish(false);
+        });
+        hls.loadSource(playUrl);
+        hls.attachMedia(video);
+      }else{
+        video.src=playUrl;
+      }
+    }else{
+      video.src=s.url;
+    }
+  });
+}
+
 async function playSelected(){
   const id=document.getElementById("selected").value.trim();
   const ep=document.getElementById("episode").value;
   const audio=document.getElementById("audio").value;
-  const provider=document.getElementById("provider").value.trim();
+  const requested=document.getElementById("provider").value.trim();
   const status=document.getElementById("status");
   if(!id){status.textContent="검색 결과에서 작품을 먼저 선택하세요.";return;}
 
-  let url="/anime/extract/"+encodeURIComponent(id)+"?e="+encodeURIComponent(ep)+"&type="+encodeURIComponent(audio);
-  if(provider) url+="&provider="+encodeURIComponent(provider);
+  const token=++playToken;
+  const candidates=requested ? [requested] : [null,...PROVIDERS];
+  const tried=new Set();
 
-  status.textContent="스트림 추출 중...";
-  const r=await fetch(url);
-  const data=await r.json();
-  if(!r.ok){
-    status.textContent=JSON.stringify(data,null,2);
-    return;
-  }
+  for(const provider of candidates){
+    if(token!==playToken) return;
 
-  const streams=data.streams||[];
-  if(!streams.length){
-    status.textContent="재생 가능한 stream이 없습니다.";
-    return;
-  }
+    let url="/anime/extract/"+encodeURIComponent(id)+"?e="+encodeURIComponent(ep)+"&type="+encodeURIComponent(audio);
+    if(provider) url+="&provider="+encodeURIComponent(provider);
 
-  const s=streams[0];
-  const video=document.getElementById("video");
-  if(hls){hls.destroy();hls=null;}
+    status.textContent=(provider ? provider : "자동")+" 스트림 추출 중...";
 
-  let playUrl=s.url;
-  if(s.type==="hls" || String(s.url).includes(".m3u8")){
-    const referer=s.referer || new URL(s.url).origin + "/";
-    playUrl="/proxy_m3u8?url="+encodeURIComponent(s.url)+"&referer="+encodeURIComponent(referer);
-
-    if(Hls.isSupported()){
-      hls=new Hls();
-      hls.loadSource(playUrl);
-      hls.attachMedia(video);
-    }else{
-      video.src=playUrl;
+    let r;
+    let data;
+    try{
+      r=await fetch(url);
+      data=await r.json();
+    }catch(_e){
+      continue;
     }
-  }else{
-    video.src=playUrl;
+
+    if(!r.ok) continue;
+
+    const actual=data.provider||provider||"unknown";
+    if(tried.has(actual)) continue;
+    tried.add(actual);
+
+    status.textContent=actual+" 재생 확인 중...";
+    const ok=await tryStream(data,token);
+    if(ok) return;
   }
 
-  status.textContent="provider: "+(data.provider||"?")+" | stream: "+(s.server||s.type||"?");
-  video.play().catch(()=>{});
+  status.textContent="재생 가능한 provider를 찾지 못했습니다.";
 }
 </script>
 </body>
