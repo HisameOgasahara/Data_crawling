@@ -39,6 +39,14 @@ class KuhiClient:
         response.raise_for_status()
         return response.json()
 
+    def episodes(self, anilist_id: int | str) -> dict[str, Any]:
+        response = requests.get(
+            f"{self.base_url}/anime/episodes/{anilist_id}",
+            timeout=90,
+        )
+        response.raise_for_status()
+        return response.json()
+
     def extract(
         self,
         query_or_id: str | int,
