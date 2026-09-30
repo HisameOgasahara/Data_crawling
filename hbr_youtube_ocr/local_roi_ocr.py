@@ -10,7 +10,7 @@ import cv2
 import numpy as np
 
 
-WINDOW_NAME = "HBR grayscale ROI"
+WINDOW_NAME = "HBR text mask"
 
 # The UI position is almost fixed.
 # Detection is performed ONLY inside these grayscale search zones.
@@ -432,6 +432,7 @@ def main():
         f"Loaded {len(known_names)} known names from "
         f"{args.names_file}"
     )
+    print("Single-window mode: only 'HBR text mask' will be created.")
 
     cap = cv2.VideoCapture(
         str(args.video)
@@ -460,6 +461,8 @@ def main():
 
     paused = not args.autoplay
     manga_ocr = None
+
+    cv2.destroyAllWindows()
 
     cv2.namedWindow(
         WINDOW_NAME,
