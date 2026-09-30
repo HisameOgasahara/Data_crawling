@@ -481,16 +481,208 @@ def text_box_from_group(
     )
 
 
+def detect_name_text_box(
+    frame,
+    mask,
+    panel_top,
+):
+    """
+    Detect the actual white character-name glyphs only.
+
+    Search is tightly constrained:
+    - left side only
+    - immediately above dialogue panel
+    - never allowed to cross panel_top
+    """
+    height, width = frame.shape[:2]
+
+    x1 = int(round(width * 0.025))
+    x2 = int(round(width * 0.22))
+
+    y2 = max(
+        1,
+        panel_top,
+    )
+    y1 = max(
+        0,
+        y2 - int(round(height * 0.105)),
+    )
+
+    region = mask[
+        y1:y2,
+        x1:x2,
+    ]
+
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+        region,
+        connectivity=8,
+    )
+
+    glyph_boxes = []
+
+    min_h = max(
+        8,
+        int(round(height * 0.018)),
+    )
+    max_h = int(round(height * 0.070))
+
+    for label_id in range(
+        1,
+        num_labels,
+    ):
+        x, y, w, h, area = stats[
+            label_id
+        ]
+
+        if h < min_h or h > max_h:
+            continue
+
+        if w > int(round(width * 0.060)):
+            continue
+
+        if area < max(
+            12,
+            int(round(width * height * 0.00001)),
+        ):
+            continue
+
+        glyph_boxes.append(
+            (
+                x1 + x,
+                y1 + y,
+                w,
+                h,
+            )
+        )
+
+    if len(glyph_boxes) < 2:
+        return None
+
+    # Group glyphs by vertical center.
+    groups = []
+
+    for box in sorted(
+        glyph_boxes,
+        key=lambda b: b[0],
+    ):
+        bx, by, bw, bh = box
+        center_y = by + bh / 2
+
+        placed = False
+
+        for group in groups:
+            group_center = float(
+                np.mean(
+                    [
+                        gy + gh / 2
+                        for gx, gy, gw, gh
+                        in group
+                    ]
+                )
+            )
+
+            if abs(
+                center_y - group_center
+            ) <= int(round(height * 0.020)):
+                group.append(box)
+                placed = True
+                break
+
+        if not placed:
+            groups.append([box])
+
+    # Prefer a compact multi-glyph row nearest the dialogue panel.
+    candidates = []
+
+    for group in groups:
+        if len(group) < 2:
+            continue
+
+        gx1 = min(
+            b[0]
+            for b in group
+        )
+        gy1 = min(
+            b[1]
+            for b in group
+        )
+        gx2 = max(
+            b[0] + b[2]
+            for b in group
+        )
+        gy2 = max(
+            b[1] + b[3]
+            for b in group
+        )
+
+        group_width = gx2 - gx1
+        group_height = gy2 - gy1
+
+        if group_width < int(round(width * 0.035)):
+            continue
+
+        if group_width > int(round(width * 0.18)):
+            continue
+
+        if gy2 > panel_top:
+            continue
+
+        candidates.append(
+            (
+                gx1,
+                gy1,
+                group_width,
+                group_height,
+            )
+        )
+
+    if not candidates:
+        return None
+
+    name_text = max(
+        candidates,
+        key=lambda box: (
+            box[1] + box[3],
+            box[2],
+        ),
+    )
+
+    pad_x = int(round(width * 0.012))
+    pad_y = int(round(height * 0.010))
+
+    nx, ny, nw, nh = name_text
+
+    nx1 = max(
+        x1,
+        nx - pad_x,
+    )
+    ny1 = max(
+        y1,
+        ny - pad_y,
+    )
+    nx2 = min(
+        x2,
+        nx + nw + pad_x,
+    )
+    ny2 = min(
+        panel_top,
+        ny + nh + pad_y,
+    )
+
+    return (
+        nx1,
+        ny1,
+        nx2 - nx1,
+        ny2 - ny1,
+    )
+
+
 def detect_boxes(frame):
     """
-    Final simplified logic.
-
-    1) Detect ONLY the top edge of the bottom translucent dialogue panel.
-    2) If the panel exists, derive exactly two boxes from that one y-coordinate:
-       - dialogue_box: full width, panel_top -> frame bottom
-       - name_box: fixed left-side box immediately above panel_top
-    3) Do not try to rediscover the name/dialogue text with contours.
-       HBR UI geometry is stable enough that those extra detectors only create false negatives.
+    1) Detect dialogue-panel top from grayscale.
+    2) dialogue_box is the full bottom panel.
+    3) name_box is derived from actual white name glyphs only,
+       in a narrow region immediately above panel_top.
     """
     gray, mask = make_grayscale_mask(
         frame
@@ -517,22 +709,19 @@ def detect_boxes(frame):
         height - panel_top,
     )
 
-    # Character name panel position is fixed relative to dialogue-panel top.
-    name_x1 = int(round(width * 0.035))
-    name_x2 = int(round(width * 0.180))
-
-    name_y2 = panel_top - int(round(height * 0.010))
-    name_y1 = name_y2 - int(round(height * 0.080))
-
-    name_y1 = max(0, name_y1)
-    name_y2 = max(name_y1 + 1, name_y2)
-
-    name_box = (
-        name_x1,
-        name_y1,
-        name_x2 - name_x1,
-        name_y2 - name_y1,
+    name_box = detect_name_text_box(
+        frame,
+        mask,
+        panel_top,
     )
+
+    if name_box is None:
+        return (
+            mask,
+            None,
+            None,
+            panel_drop,
+        )
 
     return (
         mask,
