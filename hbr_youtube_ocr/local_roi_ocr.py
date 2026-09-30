@@ -10,15 +10,19 @@ import cv2
 import numpy as np
 
 
-WINDOW_NAME = "HBR ROI OCR"
-MASK_WINDOW_NAME = "HBR text mask"
+WINDOW_NAME = "HBR grayscale ROI"
+
+# The UI position is almost fixed.
+# Detection is performed ONLY inside these grayscale search zones.
+NAME_SEARCH_RATIO = (0.02, 0.56, 0.28, 0.70)
+DIALOGUE_SEARCH_RATIO = (0.10, 0.67, 0.94, 0.92)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Detect HBR speaker/dialogue boxes directly from a black-white mask, "
-            "then run MangaOCR on demand."
+            "Detect HBR name/dialogue text from grayscale only, "
+            "inside fixed UI search zones."
         )
     )
     parser.add_argument("video", type=Path, help="Video file path")
@@ -58,6 +62,23 @@ def resize_for_display(frame, target_width: int):
     )
 
     return display, scale
+
+
+def ratio_box(frame, ratio):
+    height, width = frame.shape[:2]
+    x1r, y1r, x2r, y2r = ratio
+
+    x1 = int(round(width * x1r))
+    y1 = int(round(height * y1r))
+    x2 = int(round(width * x2r))
+    y2 = int(round(height * y2r))
+
+    return (
+        x1,
+        y1,
+        x2 - x1,
+        y2 - y1,
+    )
 
 
 def normalize_text(text: str) -> str:
@@ -143,11 +164,7 @@ def crop_from_box(frame, box):
         return None
 
     x, y, w, h = box
-
-    return frame[
-        y : y + h,
-        x : x + w,
-    ]
+    return frame[y : y + h, x : x + w]
 
 
 def draw_box(
@@ -187,114 +204,24 @@ def draw_box(
     )
 
 
-def clamp_box(frame, box):
-    if box is None:
-        return None
-
-    height, width = frame.shape[:2]
-    x, y, w, h = box
-
-    x1 = max(0, x)
-    y1 = max(0, y)
-    x2 = min(width, x + w)
-    y2 = min(height, y + h)
-
-    if x2 <= x1 or y2 <= y1:
-        return None
-
-    return (
-        x1,
-        y1,
-        x2 - x1,
-        y2 - y1,
-    )
-
-
-def expand_box(
-    frame,
-    box,
-    pad_x,
-    pad_y,
-):
-    if box is None:
-        return None
-
-    x, y, w, h = box
-
-    return clamp_box(
-        frame,
-        (
-            x - pad_x,
-            y - pad_y,
-            w + 2 * pad_x,
-            h + 2 * pad_y,
-        ),
-    )
-
-
-def union_boxes(boxes):
-    if not boxes:
-        return None
-
-    x1 = min(x for x, y, w, h in boxes)
-    y1 = min(y for x, y, w, h in boxes)
-    x2 = max(x + w for x, y, w, h in boxes)
-    y2 = max(y + h for x, y, w, h in boxes)
-
-    return (
-        x1,
-        y1,
-        x2 - x1,
-        y2 - y1,
-    )
-
-
-def make_text_mask(frame):
-    """
-    White text on HBR dialogue UI is bright / low-saturation,
-    but it also sits on a dark translucent panel.
-
-    The local-mean condition suppresses bright background objects,
-    leaving mostly white glyphs that sit on dark UI.
-    """
-    hsv = cv2.cvtColor(
-        frame,
-        cv2.COLOR_BGR2HSV,
-    )
-
+def make_grayscale_text_mask(frame):
     gray = cv2.cvtColor(
         frame,
         cv2.COLOR_BGR2GRAY,
     )
 
-    saturation = hsv[:, :, 1]
-    value = hsv[:, :, 2]
-
-    local_mean = cv2.boxFilter(
+    # Keep only very bright glyph-like pixels.
+    _, mask = cv2.threshold(
         gray,
-        ddepth=cv2.CV_32F,
-        ksize=(41, 41),
-        normalize=True,
+        185,
+        255,
+        cv2.THRESH_BINARY,
     )
 
-    white = (
-        (saturation <= 90)
-        & (value >= 180)
-    )
-
-    dark_backing = (
-        local_mean <= 175
-    )
-
-    mask = (
-        white
-        & dark_backing
-    ).astype(np.uint8) * 255
-
-    return mask
+    return gray, mask
 
 
-def find_line_boxes(
+def detect_text_box_in_zone(
     frame,
     mask,
     search_box,
@@ -302,22 +229,20 @@ def find_line_boxes(
     max_width_ratio,
     min_height_ratio,
     max_height_ratio,
+    horizontal_close_ratio,
+    vertical_gap_ratio,
 ):
     height, width = frame.shape[:2]
 
     sx, sy, sw, sh = search_box
+    region = mask[sy : sy + sh, sx : sx + sw]
 
-    region = mask[
-        sy : sy + sh,
-        sx : sx + sw,
-    ]
-
-    kernel = cv2.getStructuringElement(
+    close_kernel = cv2.getStructuringElement(
         cv2.MORPH_RECT,
         (
             max(
-                5,
-                int(round(width * 0.012)),
+                3,
+                int(round(width * horizontal_close_ratio)),
             ),
             3,
         ),
@@ -326,7 +251,7 @@ def find_line_boxes(
     connected = cv2.morphologyEx(
         region,
         cv2.MORPH_CLOSE,
-        kernel,
+        close_kernel,
         iterations=2,
     )
 
@@ -336,29 +261,21 @@ def find_line_boxes(
         cv2.CHAIN_APPROX_SIMPLE,
     )
 
-    boxes = []
+    lines = []
 
     for contour in contours:
-        x, y, w, h = cv2.boundingRect(
-            contour
-        )
+        x, y, w, h = cv2.boundingRect(contour)
 
-        width_ratio = w / width
-        height_ratio = h / height
+        wr = w / width
+        hr = h / height
 
-        if width_ratio < min_width_ratio:
+        if wr < min_width_ratio or wr > max_width_ratio:
             continue
 
-        if width_ratio > max_width_ratio:
+        if hr < min_height_ratio or hr > max_height_ratio:
             continue
 
-        if height_ratio < min_height_ratio:
-            continue
-
-        if height_ratio > max_height_ratio:
-            continue
-
-        boxes.append(
+        lines.append(
             (
                 sx + x,
                 sy + y,
@@ -367,159 +284,111 @@ def find_line_boxes(
             )
         )
 
-    boxes.sort(
-        key=lambda box: (
-            box[1],
-            box[0],
-        )
-    )
+    if not lines:
+        return None
 
-    return boxes
-
-
-def detect_two_boxes_from_mask(
-    frame,
-    mask,
-):
-    """
-    Exactly two boxes:
-    - dialogue box: one wide text group in the lower part of the frame
-    - name box: one compact text group directly above it on the left
-
-    If either box is missing, both are treated as absent.
-    """
-    height, width = frame.shape[:2]
-
-    dialogue_search = (
-        int(round(width * 0.08)),
-        int(round(height * 0.64)),
-        int(round(width * 0.86)),
-        int(round(height * 0.30)),
-    )
-
-    dialogue_lines = find_line_boxes(
-        frame,
-        mask,
-        dialogue_search,
-        min_width_ratio=0.06,
-        max_width_ratio=0.84,
-        min_height_ratio=0.018,
-        max_height_ratio=0.080,
-    )
-
-    if not dialogue_lines:
-        return None, None
-
-    # Keep only lines that belong to one vertically compact dialogue group.
-    dialogue_lines.sort(
+    lines.sort(
         key=lambda box: box[1]
     )
 
-    grouped = []
-    current_group = []
+    groups = []
+    current = [lines[0]]
 
-    for box in dialogue_lines:
-        if not current_group:
-            current_group = [box]
-            continue
+    max_gap = int(round(height * vertical_gap_ratio))
 
-        previous = current_group[-1]
+    for box in lines[1:]:
+        previous = current[-1]
         previous_bottom = previous[1] + previous[3]
-        vertical_gap = box[1] - previous_bottom
+        gap = box[1] - previous_bottom
 
-        if vertical_gap <= int(round(height * 0.045)):
-            current_group.append(box)
+        if gap <= max_gap:
+            current.append(box)
         else:
-            grouped.append(current_group)
-            current_group = [box]
+            groups.append(current)
+            current = [box]
 
-    if current_group:
-        grouped.append(current_group)
+    groups.append(current)
 
     best_group = max(
-        grouped,
+        groups,
         key=lambda group: sum(
             box[2] * box[3]
             for box in group
         ),
     )
 
-    dialogue_text_box = union_boxes(
-        best_group
+    x1 = min(box[0] for box in best_group)
+    y1 = min(box[1] for box in best_group)
+    x2 = max(box[0] + box[2] for box in best_group)
+    y2 = max(box[1] + box[3] for box in best_group)
+
+    pad_x = int(round(width * 0.012))
+    pad_y = int(round(height * 0.010))
+
+    x1 = max(sx, x1 - pad_x)
+    y1 = max(sy, y1 - pad_y)
+    x2 = min(sx + sw, x2 + pad_x)
+    y2 = min(sy + sh, y2 + pad_y)
+
+    return (
+        x1,
+        y1,
+        x2 - x1,
+        y2 - y1,
     )
 
-    dialogue_box = expand_box(
+
+def detect_rois(frame):
+    gray, mask = make_grayscale_text_mask(frame)
+
+    name_search = ratio_box(
         frame,
-        dialogue_text_box,
-        pad_x=int(round(width * 0.025)),
-        pad_y=int(round(height * 0.020)),
+        NAME_SEARCH_RATIO,
     )
 
-    if dialogue_box is None:
-        return None, None
-
-    dx, dy, dw, dh = dialogue_box
-
-    if dw < int(round(width * 0.25)):
-        return None, None
-
-    name_search_bottom = dy
-    name_search_top = max(
-        0,
-        name_search_bottom - int(round(height * 0.14)),
+    dialogue_search = ratio_box(
+        frame,
+        DIALOGUE_SEARCH_RATIO,
     )
 
-    name_search = (
-        int(round(width * 0.015)),
-        name_search_top,
-        int(round(width * 0.26)),
-        max(
-            1,
-            name_search_bottom - name_search_top,
-        ),
-    )
-
-    name_lines = find_line_boxes(
+    name_box = detect_text_box_in_zone(
         frame,
         mask,
         name_search,
-        min_width_ratio=0.02,
-        max_width_ratio=0.18,
+        min_width_ratio=0.020,
+        max_width_ratio=0.20,
         min_height_ratio=0.018,
         max_height_ratio=0.070,
+        horizontal_close_ratio=0.008,
+        vertical_gap_ratio=0.020,
     )
 
-    if not name_lines:
-        return None, None
-
-    name_text_box = max(
-        name_lines,
-        key=lambda box: box[2] * box[3],
-    )
-
-    name_box = expand_box(
+    dialogue_box = detect_text_box_in_zone(
         frame,
-        name_text_box,
-        pad_x=int(round(width * 0.018)),
-        pad_y=int(round(height * 0.012)),
+        mask,
+        dialogue_search,
+        min_width_ratio=0.060,
+        max_width_ratio=0.84,
+        min_height_ratio=0.018,
+        max_height_ratio=0.080,
+        horizontal_close_ratio=0.012,
+        vertical_gap_ratio=0.045,
     )
 
-    if name_box is None:
-        return None, None
-
-    nx, ny, nw, nh = name_box
-
-    # Hard constraints.
-    if ny + nh > dy:
-        return None, None
-
-    if nx > int(round(width * 0.30)):
-        return None, None
-
-    if nw > int(round(width * 0.25)):
-        return None, None
+    # Strict relation: name must be above dialogue.
+    if (
+        name_box is None
+        or dialogue_box is None
+        or name_box[1] + name_box[3] > dialogue_box[1]
+    ):
+        name_box = None
+        dialogue_box = None
 
     return (
+        gray,
+        mask,
+        name_search,
+        dialogue_search,
         name_box,
         dialogue_box,
     )
@@ -597,11 +466,6 @@ def main():
         cv2.WINDOW_NORMAL,
     )
 
-    cv2.namedWindow(
-        MASK_WINDOW_NAME,
-        cv2.WINDOW_NORMAL,
-    )
-
     ok, frame = cap.read()
 
     if not ok:
@@ -618,73 +482,58 @@ def main():
             else:
                 frame = next_frame
 
-        mask = make_text_mask(
+        (
+            gray,
+            mask,
+            name_search,
+            dialogue_search,
+            name_box,
+            dialogue_box,
+        ) = detect_rois(
             frame
         )
 
-        (
-            name_box,
-            dialogue_box,
-        ) = detect_two_boxes_from_mask(
-            frame,
-            mask,
-        )
-
-        display, scale = resize_for_display(
-            frame,
-            args.width,
-        )
-
-        draw_box(
-            display,
-            name_box,
-            scale,
-            "name-box",
-            (0, 255, 0),
-        )
-
-        draw_box(
-            display,
-            dialogue_box,
-            scale,
-            "dialogue-box",
-            (255, 0, 0),
-        )
-
-        mask_display = cv2.cvtColor(
+        # Show ONE window only: grayscale/mask composite.
+        debug = cv2.cvtColor(
             mask,
             cv2.COLOR_GRAY2BGR,
         )
 
-        mask_display, mask_scale = resize_for_display(
-            mask_display,
+        display, scale = resize_for_display(
+            debug,
             args.width,
         )
 
         draw_box(
-            mask_display,
+            display,
+            name_search,
+            scale,
+            "name-search",
+            (0, 180, 180),
+        )
+
+        draw_box(
+            display,
+            dialogue_search,
+            scale,
+            "dialogue-search",
+            (180, 180, 0),
+        )
+
+        draw_box(
+            display,
             name_box,
-            mask_scale,
+            scale,
             "name-box",
             (0, 255, 0),
         )
 
         draw_box(
-            mask_display,
+            display,
             dialogue_box,
-            mask_scale,
+            scale,
             "dialogue-box",
             (255, 0, 0),
-        )
-
-        cv2.imshow(
-            WINDOW_NAME,
-            display,
-        )
-
-        cv2.imshow(
-            MASK_WINDOW_NAME,
-            mask_display,
         )
 
         current_frame = int(
@@ -702,6 +551,25 @@ def main():
             current_frame / fps
             if fps > 0
             else 0.0
+        )
+
+        cv2.putText(
+            display,
+            (
+                f"{current_sec:.2f}/{duration_sec:.2f}s  "
+                f"{'PAUSE' if paused else 'PLAY'}"
+            ),
+            (20, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+
+        cv2.imshow(
+            WINDOW_NAME,
+            display,
         )
 
         delay = (
@@ -796,7 +664,7 @@ def main():
                 or dialogue_box is None
             ):
                 print(
-                    "No valid name/dialogue pair on this frame."
+                    "No valid name/dialogue pair on this grayscale mask."
                 )
                 continue
 
