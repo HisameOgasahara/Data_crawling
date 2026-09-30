@@ -4,7 +4,7 @@
 
 ## anime_api
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/HisameOgasahara/Data_crawling/blob/main/anime_api/anime_api_colab.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/HisameOgasahara/Data_crawling/blob/main/anime_api/anime_api_colab.ipynb?skip_cache=true)
 
 [aryaniiil/anime-api (Kuhi)](https://github.com/aryaniiil/anime-api)를 Colab에서 테스트하기 위한 래퍼입니다.
 
