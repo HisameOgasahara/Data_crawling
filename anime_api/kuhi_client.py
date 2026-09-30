@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 from yt_dlp import YoutubeDL
@@ -59,6 +60,71 @@ class KuhiClient:
         )
         response.raise_for_status()
         return response.json()
+
+    def _subtitle_language(self, subtitle: dict[str, Any]) -> str | None:
+        raw = " ".join(
+            str(subtitle.get(key) or "")
+            for key in ("srclang", "language", "label")
+        ).lower()
+
+        if any(token in raw for token in ("en-us", "en-gb", "english", " eng", "en")):
+            return "en"
+
+        if any(token in raw for token in ("ja-jp", "japanese", " jpn", " jp", "ja")):
+            return "ja"
+
+        return None
+
+    def _download_subtitles(
+        self,
+        extract_result: dict[str, Any],
+        output_path: str,
+        languages: set[str],
+    ) -> list[Path]:
+        subtitles = extract_result.get("subtitles") or []
+        if not subtitles or not languages:
+            return []
+
+        output = Path(output_path)
+        base = output.with_suffix("")
+        saved: list[Path] = []
+        seen_languages: set[str] = set()
+
+        for subtitle in subtitles:
+            language = self._subtitle_language(subtitle)
+            if language not in languages or language in seen_languages:
+                continue
+
+            url = subtitle.get("url")
+            if not url:
+                continue
+
+            fmt = str(subtitle.get("format") or "").strip().lower()
+            if not fmt:
+                suffix = Path(urlparse(url).path).suffix.lower().lstrip(".")
+                fmt = suffix or "vtt"
+
+            subtitle_path = Path(f"{base}.{language}.{fmt}")
+
+            headers: dict[str, str] = {}
+            referer = subtitle.get("referer")
+            if referer:
+                headers["Referer"] = referer
+
+            response = requests.get(
+                url,
+                headers=headers,
+                timeout=30,
+            )
+
+            if not response.ok or not response.content:
+                continue
+
+            subtitle_path.write_bytes(response.content)
+            saved.append(subtitle_path)
+            seen_languages.add(language)
+
+        return saved
 
     def _download_stream(
         self,
@@ -118,16 +184,31 @@ class KuhiClient:
         stream_index: int = 0,
         retry_other_providers: bool = True,
         quality: str = "best",
+        subtitle_english: bool = False,
+        subtitle_japanese: bool = False,
     ) -> Path:
         current_provider = extract_result.get("provider")
+        subtitle_languages: set[str] = set()
+
+        if subtitle_english:
+            subtitle_languages.add("en")
+
+        if subtitle_japanese:
+            subtitle_languages.add("ja")
 
         try:
-            return self._download_stream(
+            saved = self._download_stream(
                 extract_result,
                 output_path=output_path,
                 stream_index=stream_index,
                 quality=quality,
             )
+            self._download_subtitles(
+                extract_result,
+                output_path=output_path,
+                languages=subtitle_languages,
+            )
+            return saved
         except (DownloadError, RuntimeError) as first_error:
             if not retry_other_providers:
                 raise
@@ -178,12 +259,18 @@ class KuhiClient:
                         f"[fallback] {provider}: "
                         f"실제 provider={actual_provider or provider} 다운로드 시도"
                     )
-                    return self._download_stream(
+                    saved = self._download_stream(
                         candidate,
                         output_path=output_path,
                         stream_index=stream_index,
                         quality=quality,
                     )
+                    self._download_subtitles(
+                        candidate,
+                        output_path=output_path,
+                        languages=subtitle_languages,
+                    )
+                    return saved
                 except (DownloadError, RuntimeError) as error:
                     last_error = error
                     print(f"[fallback] {actual_provider or provider}: 다운로드 실패")
