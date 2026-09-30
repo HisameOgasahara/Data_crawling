@@ -1,14 +1,19 @@
 # anime_api
 
-Kuhi `aryaniiil/anime-api`를 Colab CPU에서 테스트하기 위한 독립 폴더입니다.
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/HisameOgasahara/Data_crawling/blob/main/anime_api/anime_api_colab.ipynb)
 
-## 파일
+[aryaniiil/anime-api (Kuhi)](https://github.com/aryaniiil/anime-api)를 Colab에서 테스트하기 위한 래퍼입니다.
 
-- `anime_api_colab.ipynb`: 설치, `@param` 입력, 검색 썸네일, 추출, 다운로드, Cloudflare Tunnel 실행
-- `kuhi_client.py`: Kuhi REST API 호출과 yt-dlp 다운로드
-- `colab_app.py`: 원본 Kuhi FastAPI 앱에 `/viewer` 검색/동영상 뷰어 추가
+- CPU Colab 런타임 사용 가능
+- Google Drive 미사용
+- AniList 검색 및 썸네일 표시
+- Kuhi 스트림 추출
+- yt-dlp 다운로드
+- Cloudflare Tunnel 기반 검색/동영상 뷰어
+
+## Files
+
+- `anime_api_colab.ipynb`: Colab 실행 노트북
+- `kuhi_client.py`: 검색/추출/다운로드 클라이언트
+- `colab_app.py`: Cloudflare로 노출할 검색/동영상 뷰어
 - `requirements.txt`: 래퍼 의존성
-
-원본 Kuhi 코드는 이 저장소에 복사하지 않고 Colab 실행 시 최신 `main`을 clone합니다.
-
-Google Drive는 사용하지 않습니다. 다운로드 결과 기본 경로는 `/content/downloads/`입니다.
