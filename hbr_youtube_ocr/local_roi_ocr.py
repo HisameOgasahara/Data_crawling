@@ -432,6 +432,16 @@ def text_box_from_group(
 
 
 def detect_boxes(frame):
+    """
+    Final simplified logic.
+
+    1) Detect ONLY the top edge of the bottom translucent dialogue panel.
+    2) If the panel exists, derive exactly two boxes from that one y-coordinate:
+       - dialogue_box: full width, panel_top -> frame bottom
+       - name_box: fixed left-side box immediately above panel_top
+    3) Do not try to rediscover the name/dialogue text with contours.
+       HBR UI geometry is stable enough that those extra detectors only create false negatives.
+    """
     gray, mask = make_grayscale_mask(
         frame
     )
@@ -450,7 +460,6 @@ def detect_boxes(frame):
             panel_drop,
         )
 
-    # Dialogue box is the entire bottom panel.
     dialogue_box = (
         0,
         panel_top,
@@ -458,86 +467,26 @@ def detect_boxes(frame):
         height - panel_top,
     )
 
-    # Character-name panel location is effectively fixed relative
-    # to the dialogue panel. Do NOT search the whole upper-left area.
+    # Character name panel position is fixed relative to dialogue-panel top.
     name_x1 = int(round(width * 0.035))
-    name_x2 = int(round(width * 0.185))
+    name_x2 = int(round(width * 0.180))
 
-    name_y2 = panel_top - int(round(height * 0.012))
-    name_y1 = name_y2 - int(round(height * 0.075))
+    name_y2 = panel_top - int(round(height * 0.010))
+    name_y1 = name_y2 - int(round(height * 0.080))
 
     name_y1 = max(0, name_y1)
     name_y2 = max(name_y1 + 1, name_y2)
 
-    fixed_name_box = (
+    name_box = (
         name_x1,
         name_y1,
         name_x2 - name_x1,
         name_y2 - name_y1,
     )
 
-    # Validate that name text really exists inside the fixed name panel.
-    nx, ny, nw, nh = fixed_name_box
-    name_region = mask[
-        ny : ny + nh,
-        nx : nx + nw,
-    ]
-
-    name_white_pixels = int(
-        np.count_nonzero(
-            name_region
-        )
-    )
-
-    name_min_pixels = max(
-        30,
-        int(round(
-            width
-            * height
-            * 0.00006
-        )),
-    )
-
-    if name_white_pixels < name_min_pixels:
-        return (
-            mask,
-            None,
-            None,
-            panel_drop,
-        )
-
-    # Validate dialogue text inside the bottom panel as well.
-    dialogue_text_region = mask[
-        panel_top:height,
-        int(round(width * 0.08)) : int(round(width * 0.94)),
-    ]
-
-    dialogue_white_pixels = int(
-        np.count_nonzero(
-            dialogue_text_region
-        )
-    )
-
-    dialogue_min_pixels = max(
-        120,
-        int(round(
-            width
-            * height
-            * 0.00020
-        )),
-    )
-
-    if dialogue_white_pixels < dialogue_min_pixels:
-        return (
-            mask,
-            None,
-            None,
-            panel_drop,
-        )
-
     return (
         mask,
-        fixed_name_box,
+        name_box,
         dialogue_box,
         panel_drop,
     )
