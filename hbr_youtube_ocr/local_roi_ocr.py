@@ -442,88 +442,136 @@ def detect_two_boxes(
     dialogue_panel,
 ):
     """
-    HBR UI constraint:
-    1) exactly two boxes exist for this task: name box and dialogue box
-    2) name box is always above dialogue box
-    3) the two boxes never overlap
-    4) dialogue box is the whole bottom panel from panel_top to frame bottom
+    Detect exactly two UI text boxes from the white-text mask.
+
+    Constraints:
+    - dialogue and name appear together
+    - name box is always above dialogue box
+    - name box is on the left and much smaller
+    - dialogue box is one wide box in the lower screen
+    - if either one is missing, return no pair
     """
-    if dialogue_panel is None:
-        return (
-            None,
-            None,
-            None,
-        )
-
     height, width = frame.shape[:2]
-    _, panel_top, _, _ = dialogue_panel
-
-    # Dialogue box: one full-width bottom region only.
-    dialogue_box = (
-        0,
-        panel_top,
-        width,
-        height - panel_top,
-    )
 
     white_mask = make_white_text_mask(
         frame
     )
 
-    # Name box may only exist immediately above the dialogue panel, on the left.
-    name_search_height = int(round(height * 0.115))
+    # Dialogue text search: lower and wide.
+    dialogue_search = (
+        int(round(width * 0.08)),
+        int(round(height * 0.66)),
+        int(round(width * 0.86)),
+        int(round(height * 0.27)),
+    )
+
+    dialogue_lines = find_line_boxes(
+        frame,
+        white_mask,
+        dialogue_search,
+        min_width_ratio=0.08,
+        max_width_ratio=0.82,
+        min_height_ratio=0.018,
+        max_height_ratio=0.075,
+    )
+
+    if not dialogue_lines:
+        return (
+            None,
+            None,
+            white_mask,
+        )
+
+    dialogue_text_box = union_boxes(
+        dialogue_lines
+    )
+
+    dialogue_box = expand_box(
+        frame,
+        dialogue_text_box,
+        pad_x=int(round(width * 0.025)),
+        pad_y=int(round(height * 0.018)),
+    )
+
+    # Name text search: left side, directly above the detected dialogue box.
+    dialogue_top = dialogue_box[1]
+
+    name_search_top = max(
+        0,
+        dialogue_top - int(round(height * 0.15)),
+    )
+
     name_search = (
-        int(round(width * 0.020)),
+        int(round(width * 0.02)),
+        name_search_top,
+        int(round(width * 0.25)),
         max(
-            0,
-            panel_top - name_search_height,
+            1,
+            dialogue_top - name_search_top,
         ),
-        int(round(width * 0.245)),
-        name_search_height,
     )
 
     name_lines = find_line_boxes(
         frame,
         white_mask,
         name_search,
-        min_width_ratio=0.020,
+        min_width_ratio=0.02,
         max_width_ratio=0.18,
         min_height_ratio=0.018,
         max_height_ratio=0.070,
     )
 
-    name_box = None
-
-    if name_lines:
-        best_name_text = max(
-            name_lines,
-            key=lambda box: box[2] * box[3],
+    if not name_lines:
+        return (
+            None,
+            None,
+            white_mask,
         )
 
-        # Expand around the detected name text, but clamp strictly
-        # to the name-search area and above dialogue_box.
-        candidate = expand_box(
-            frame,
-            best_name_text,
-            pad_x=int(round(width * 0.020)),
-            pad_y=int(round(height * 0.014)),
+    # Pick one compact name line only.
+    best_name_text = max(
+        name_lines,
+        key=lambda box: box[2] * box[3],
+    )
+
+    name_box = expand_box(
+        frame,
+        best_name_text,
+        pad_x=int(round(width * 0.018)),
+        pad_y=int(round(height * 0.012)),
+    )
+
+    # Hard geometry constraints.
+    nx, ny, nw, nh = name_box
+    dx, dy, dw, dh = dialogue_box
+
+    if ny + nh > dy:
+        return (
+            None,
+            None,
+            white_mask,
         )
 
-        nx, ny, nw, nh = name_search
-        cx, cy, cw, ch = candidate
+    if nx > int(round(width * 0.30)):
+        return (
+            None,
+            None,
+            white_mask,
+        )
 
-        x1 = max(cx, nx)
-        y1 = max(cy, ny)
-        x2 = min(cx + cw, nx + nw)
-        y2 = min(cy + ch, panel_top)
+    if nw > int(round(width * 0.25)):
+        return (
+            None,
+            None,
+            white_mask,
+        )
 
-        if x2 > x1 and y2 > y1:
-            name_box = (
-                x1,
-                y1,
-                x2 - x1,
-                y2 - y1,
-            )
+    if dw < int(round(width * 0.30)):
+        return (
+            None,
+            None,
+            white_mask,
+        )
 
     return (
         name_box,
@@ -639,6 +687,37 @@ def main():
         ) = detect_two_boxes(
             frame,
             dialogue_panel,
+        )
+
+        mask_display = cv2.cvtColor(
+            white_mask,
+            cv2.COLOR_GRAY2BGR,
+        )
+
+        mask_display, mask_scale = resize_for_display(
+            mask_display,
+            args.width,
+        )
+
+        draw_box(
+            mask_display,
+            name_box,
+            mask_scale,
+            "name-box",
+            (0, 255, 0),
+        )
+
+        draw_box(
+            mask_display,
+            dialogue_box,
+            mask_scale,
+            "dialogue-box",
+            (255, 0, 0),
+        )
+
+        cv2.imshow(
+            "HBR white-text mask",
+            mask_display,
         )
 
         display, scale = resize_for_display(
@@ -775,9 +854,8 @@ def main():
             continue
 
         if key == ord("m"):
-            cv2.imshow(
-                "white-text-mask",
-                white_mask,
+            print(
+                "mask window is already shown continuously."
             )
             continue
 
