@@ -8,6 +8,15 @@ from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
 
+QUALITY_FORMATS = {
+    "best": "bestvideo+bestaudio/best",
+    "1080": "bestvideo[height<=1080]+bestaudio/best[height<=1080]",
+    "720": "bestvideo[height<=720]+bestaudio/best[height<=720]",
+    "480": "bestvideo[height<=480]+bestaudio/best[height<=480]",
+    "worst": "worstvideo+worstaudio/worst",
+}
+
+
 class KuhiClient:
     def __init__(self, base_url: str = "http://127.0.0.1:8000") -> None:
         self.base_url = base_url.rstrip("/")
@@ -56,6 +65,7 @@ class KuhiClient:
         extract_result: dict[str, Any],
         output_path: str,
         stream_index: int = 0,
+        quality: str = "best",
     ) -> Path:
         streams = extract_result.get("streams") or []
         downloadable_streams = [
@@ -69,6 +79,11 @@ class KuhiClient:
 
         if stream_index < 0 or stream_index >= len(downloadable_streams):
             raise IndexError("stream_index가 다운로드 가능한 streams 범위를 벗어났습니다.")
+
+        if quality not in QUALITY_FORMATS:
+            raise ValueError(
+                f"quality는 {', '.join(QUALITY_FORMATS)} 중 하나여야 합니다."
+            )
 
         stream = downloadable_streams[stream_index]
         stream_url = stream.get("url")
@@ -88,6 +103,7 @@ class KuhiClient:
             "http_headers": headers,
             "quiet": False,
             "noplaylist": True,
+            "format": QUALITY_FORMATS[quality],
         }
 
         with YoutubeDL(options) as ydl:
@@ -101,6 +117,7 @@ class KuhiClient:
         output_path: str,
         stream_index: int = 0,
         retry_other_providers: bool = True,
+        quality: str = "best",
     ) -> Path:
         current_provider = extract_result.get("provider")
 
@@ -109,6 +126,7 @@ class KuhiClient:
                 extract_result,
                 output_path=output_path,
                 stream_index=stream_index,
+                quality=quality,
             )
         except (DownloadError, RuntimeError) as first_error:
             if not retry_other_providers:
@@ -164,6 +182,7 @@ class KuhiClient:
                         candidate,
                         output_path=output_path,
                         stream_index=stream_index,
+                        quality=quality,
                     )
                 except (DownloadError, RuntimeError) as error:
                     last_error = error
