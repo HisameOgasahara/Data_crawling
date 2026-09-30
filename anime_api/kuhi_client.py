@@ -132,6 +132,7 @@ class KuhiClient:
         output_path: str,
         stream_index: int = 0,
         quality: str = "best",
+        concurrent_fragments: int = 8,
     ) -> Path:
         streams = extract_result.get("streams") or []
         downloadable_streams = [
@@ -170,6 +171,7 @@ class KuhiClient:
             "quiet": False,
             "noplaylist": True,
             "format": QUALITY_FORMATS[quality],
+            "concurrent_fragment_downloads": concurrent_fragments,
         }
 
         with YoutubeDL(options) as ydl:
@@ -186,6 +188,7 @@ class KuhiClient:
         quality: str = "best",
         subtitle_english: bool = False,
         subtitle_japanese: bool = False,
+        concurrent_fragments: int = 8,
     ) -> Path:
         current_provider = extract_result.get("provider")
         subtitle_languages: set[str] = set()
@@ -202,6 +205,7 @@ class KuhiClient:
                 output_path=output_path,
                 stream_index=stream_index,
                 quality=quality,
+                concurrent_fragments=concurrent_fragments,
             )
             self._download_subtitles(
                 extract_result,
