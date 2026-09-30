@@ -437,11 +437,18 @@ def find_line_boxes(
     return boxes
 
 
-def detect_text_rois(
+def detect_two_boxes(
     frame,
-    panel_box,
+    dialogue_panel,
 ):
-    if panel_box is None:
+    """
+    HBR UI constraint:
+    1) exactly two boxes exist for this task: name box and dialogue box
+    2) name box is always above dialogue box
+    3) the two boxes never overlap
+    4) dialogue box is the whole bottom panel from panel_top to frame bottom
+    """
+    if dialogue_panel is None:
         return (
             None,
             None,
@@ -449,95 +456,78 @@ def detect_text_rois(
         )
 
     height, width = frame.shape[:2]
-    panel_x, panel_y, panel_w, panel_h = panel_box
+    _, panel_top, _, _ = dialogue_panel
+
+    # Dialogue box: one full-width bottom region only.
+    dialogue_box = (
+        0,
+        panel_top,
+        width,
+        height - panel_top,
+    )
 
     white_mask = make_white_text_mask(
         frame
     )
 
-    # There is only ONE dialogue region.
-    # Once the bottom dialogue panel is found, the dialogue ROI is a
-    # deterministic inner rectangle of that panel instead of being rebuilt
-    # from individual text-line contours.
-    dialogue_roi = clamp_box(
-        frame,
-        (
-            int(round(width * 0.12)),
-            panel_y + int(round(panel_h * 0.06)),
-            int(round(width * 0.80)),
-            int(round(panel_h * 0.82)),
+    # Name box may only exist immediately above the dialogue panel, on the left.
+    name_search_height = int(round(height * 0.115))
+    name_search = (
+        int(round(width * 0.020)),
+        max(
+            0,
+            panel_top - name_search_height,
         ),
+        int(round(width * 0.245)),
+        name_search_height,
     )
 
-    # Speaker name is always immediately ABOVE the dialogue panel
-    # and restricted to the left side. It can never become larger than
-    # this search region.
-    name_search = clamp_box(
+    name_lines = find_line_boxes(
         frame,
-        (
-            int(round(width * 0.025)),
-            max(
-                0,
-                panel_y - int(round(height * 0.115)),
-            ),
-            int(round(width * 0.22)),
-            int(round(height * 0.105)),
-        ),
+        white_mask,
+        name_search,
+        min_width_ratio=0.020,
+        max_width_ratio=0.18,
+        min_height_ratio=0.018,
+        max_height_ratio=0.070,
     )
 
-    speaker_roi = None
+    name_box = None
 
-    if name_search is not None:
-        name_lines = find_line_boxes(
-            frame,
-            white_mask,
-            name_search,
-            min_width_ratio=0.020,
-            max_width_ratio=0.18,
-            min_height_ratio=0.018,
-            max_height_ratio=0.070,
+    if name_lines:
+        best_name_text = max(
+            name_lines,
+            key=lambda box: box[2] * box[3],
         )
 
-        if name_lines:
-            # Pick one name line only; do not union unrelated white regions.
-            best_name_box = max(
-                name_lines,
-                key=lambda box: box[2] * box[3],
+        # Expand around the detected name text, but clamp strictly
+        # to the name-search area and above dialogue_box.
+        candidate = expand_box(
+            frame,
+            best_name_text,
+            pad_x=int(round(width * 0.020)),
+            pad_y=int(round(height * 0.014)),
+        )
+
+        nx, ny, nw, nh = name_search
+        cx, cy, cw, ch = candidate
+
+        x1 = max(cx, nx)
+        y1 = max(cy, ny)
+        x2 = min(cx + cw, nx + nw)
+        y2 = min(cy + ch, panel_top)
+
+        if x2 > x1 and y2 > y1:
+            name_box = (
+                x1,
+                y1,
+                x2 - x1,
+                y2 - y1,
             )
-
-            speaker_roi = expand_box(
-                frame,
-                best_name_box,
-                pad_x=int(round(width * 0.012)),
-                pad_y=int(round(height * 0.010)),
-            )
-
-            # Hard constraint: speaker ROI must stay inside name_search
-            # and strictly above dialogue panel.
-            nx, ny, nw, nh = name_search
-            sx, sy, sw, sh = speaker_roi
-
-            sx1 = max(sx, nx)
-            sy1 = max(sy, ny)
-            sx2 = min(sx + sw, nx + nw)
-            sy2 = min(
-                sy + sh,
-                panel_y,
-            )
-
-            if sx2 > sx1 and sy2 > sy1:
-                speaker_roi = (
-                    sx1,
-                    sy1,
-                    sx2 - sx1,
-                    sy2 - sy1,
-                )
-            else:
-                speaker_roi = None
 
     return (
-        speaker_roi,
-        dialogue_roi,
+        name_box,
+        dialogue_box,
         white_mask,
     )
 
@@ -643,10 +633,10 @@ def main():
         )
 
         (
-            speaker_roi,
-            dialogue_roi,
+            name_box,
+            dialogue_box,
             white_mask,
-        ) = detect_text_rois(
+        ) = detect_two_boxes(
             frame,
             dialogue_panel,
         )
@@ -658,25 +648,17 @@ def main():
 
         draw_box(
             display,
-            dialogue_panel,
+            name_box,
             scale,
-            "dialogue-panel",
-            (0, 255, 255),
-        )
-
-        draw_box(
-            display,
-            speaker_roi,
-            scale,
-            "speaker-roi",
+            "name-box",
             (0, 255, 0),
         )
 
         draw_box(
             display,
-            dialogue_roi,
+            dialogue_box,
             scale,
-            "dialogue-roi",
+            "dialogue-box",
             (255, 0, 0),
         )
 
@@ -803,12 +785,11 @@ def main():
             paused = True
 
             if (
-                speaker_roi is None
-                or dialogue_roi is None
+                name_box is None
+                or dialogue_box is None
             ):
                 print(
-                    "speaker/dialogue ROI was not detected "
-                    "inside the dialogue panel."
+                    "name/dialogue box was not detected."
                 )
                 continue
 
@@ -829,12 +810,12 @@ def main():
 
             speaker_crop = crop_from_box(
                 frame,
-                speaker_roi,
+                name_box,
             )
 
             dialogue_crop = crop_from_box(
                 frame,
-                dialogue_roi,
+                dialogue_box,
             )
 
             speaker_img = prepare_ocr_image(
@@ -874,16 +855,12 @@ def main():
                 f"[{current_sec:.2f}s]"
             )
             print(
-                "dialogue panel:",
-                dialogue_panel,
+                "name box      :",
+                name_box,
             )
             print(
-                "speaker roi   :",
-                speaker_roi,
-            )
-            print(
-                "dialogue roi  :",
-                dialogue_roi,
+                "dialogue box  :",
+                dialogue_box,
             )
             print(
                 "speaker raw   :",
