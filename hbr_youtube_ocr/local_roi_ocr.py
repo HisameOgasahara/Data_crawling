@@ -225,74 +225,124 @@ def smooth_1d(values, kernel_size):
 
 def detect_panel_top(gray):
     """
-    Detect the top edge of the bottom translucent dialogue panel.
+    Detect the dialogue-panel top directly from the grayscale binary mask.
 
-    We use grayscale only:
-    a real panel produces a broad, horizontal brightness drop.
+    HBR property used here:
+    - when the dialogue panel is visible, from some y downward almost the
+      entire lower region becomes black in the thresholded mask
+    - above that y, normal background still contains substantial white pixels
+    - if almost the whole frame is black, treat it as a scene transition,
+      not as dialogue UI
     """
     height, width = gray.shape[:2]
 
-    x1 = int(round(width * 0.06))
-    x2 = int(round(width * 0.94))
+    _, mask = cv2.threshold(
+        gray,
+        185,
+        255,
+        cv2.THRESH_BINARY,
+    )
 
-    y1 = int(round(height * 0.55))
-    y2 = int(round(height * 0.80))
+    frame_white_ratio = float(
+        np.count_nonzero(mask)
+        / mask.size
+    )
 
-    band = gray[
-        y1:y2,
-        x1:x2,
-    ].astype(np.float32)
+    # Nearly all-black frame: likely fade / scene transition.
+    if frame_white_ratio < 0.015:
+        return None, 0.0
 
-    row_mean = band.mean(axis=1)
+    x1 = int(round(width * 0.04))
+    x2 = int(round(width * 0.96))
 
-    row_mean = smooth_1d(
-        row_mean,
+    y_start = int(round(height * 0.52))
+    y_end = int(round(height * 0.82))
+
+    inner = mask[:, x1:x2]
+
+    row_white_ratio = (
+        np.count_nonzero(
+            inner,
+            axis=1,
+        )
+        / inner.shape[1]
+    )
+
+    # Smooth row occupancy a little so glyphs/noise do not create false edges.
+    row_white_ratio = smooth_1d(
+        row_white_ratio.astype(np.float32),
         max(
             3,
             int(round(height * 0.008)),
         ),
     )
 
-    offset = max(
-        5,
-        int(round(height * 0.018)),
+    # For each y, measure how black the whole suffix [y:bottom] is.
+    suffix_mean = np.zeros(
+        height,
+        dtype=np.float32,
+    )
+
+    running_sum = 0.0
+    running_count = 0
+
+    for y in range(height - 1, -1, -1):
+        running_sum += float(
+            row_white_ratio[y]
+        )
+        running_count += 1
+        suffix_mean[y] = (
+            running_sum
+            / running_count
+        )
+
+    # A valid panel top must satisfy:
+    # 1) region below is almost entirely black
+    # 2) region just above still has visible white structure
+    suffix_black_threshold = 0.035
+    above_white_threshold = 0.080
+    above_window = max(
+        6,
+        int(round(height * 0.030)),
     )
 
     best_y = None
-    best_drop = -1.0
+    best_score = -1.0
 
-    for local_y in range(
-        offset,
-        len(row_mean) - offset,
+    for y in range(
+        y_start,
+        y_end,
     ):
-        above = float(
-            row_mean[
-                local_y - offset : local_y
+        if suffix_mean[y] > suffix_black_threshold:
+            continue
+
+        above_start = max(
+            0,
+            y - above_window,
+        )
+
+        above_mean = float(
+            row_white_ratio[
+                above_start:y
             ].mean()
         )
 
-        below = float(
-            row_mean[
-                local_y : local_y + offset
-            ].mean()
+        if above_mean < above_white_threshold:
+            continue
+
+        score = (
+            above_mean
+            - suffix_mean[y]
         )
 
-        drop = above - below
-
-        if drop > best_drop:
-            best_drop = drop
-            best_y = y1 + local_y
+        if score > best_score:
+            best_score = score
+            best_y = y
 
     if best_y is None:
         return None, 0.0
 
-    # Reject normal scene transitions / furniture edges.
-    # The UI panel darkening is broad and usually much stronger.
-    if best_drop < 8.0:
-        return None, best_drop
-
-    return best_y, best_drop
-
+    return best_y, best_score
 
 def active_row_groups(
     mask,
