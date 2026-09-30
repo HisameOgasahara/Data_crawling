@@ -90,8 +90,18 @@ class KuhiClient:
         languages: set[str],
     ) -> list[Path]:
         subtitles = extract_result.get("subtitles") or []
-        if not subtitles or not languages:
+
+        if not languages:
+            print("[subtitle] 자막 다운로드 선택 안 함")
             return []
+
+        requested = ", ".join(sorted(languages))
+
+        if not subtitles:
+            print(f"[subtitle] 요청 언어: {requested} | provider 자막 없음")
+            return []
+
+        print(f"[subtitle] provider 자막 {len(subtitles)}개 발견 | 요청 언어: {requested}")
 
         output = Path(output_path)
         base = output.with_suffix("")
@@ -100,7 +110,22 @@ class KuhiClient:
 
         for subtitle in subtitles:
             language = self._subtitle_language(subtitle)
-            if language not in languages or language in seen_languages:
+
+            if language is None:
+                print(
+                    "[subtitle] 언어 판별 불가:",
+                    subtitle.get("label")
+                    or subtitle.get("srclang")
+                    or subtitle.get("language")
+                    or subtitle.get("url"),
+                )
+                continue
+
+            if language not in languages:
+                print(f"[subtitle] {language} 자막은 선택되지 않아 건너뜀")
+                continue
+
+            if language in seen_languages:
                 continue
 
             url = subtitle.get("url")
@@ -119,18 +144,36 @@ class KuhiClient:
             if referer:
                 headers["Referer"] = referer
 
-            response = requests.get(
-                url,
-                headers=headers,
-                timeout=30,
-            )
+            try:
+                response = requests.get(
+                    url,
+                    headers=headers,
+                    timeout=30,
+                )
+            except requests.RequestException as error:
+                print(f"[subtitle] {language} 다운로드 실패: {error}")
+                continue
 
-            if not response.ok or not response.content:
+            if not response.ok:
+                print(
+                    f"[subtitle] {language} 다운로드 실패: "
+                    f"HTTP {response.status_code}"
+                )
+                continue
+
+            if not response.content:
+                print(f"[subtitle] {language} 다운로드 실패: 빈 응답")
                 continue
 
             subtitle_path.write_bytes(response.content)
             saved.append(subtitle_path)
             seen_languages.add(language)
+            print(f"[subtitle] {language} 저장 완료: {subtitle_path}")
+
+        missing = languages - seen_languages
+
+        for language in sorted(missing):
+            print(f"[subtitle] {language} 자막 없음 또는 저장 실패")
 
         return saved
 
