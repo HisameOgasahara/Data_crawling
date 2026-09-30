@@ -1,15 +1,151 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
+from pathlib import Path
 from urllib.parse import quote
 
 KUHI_ROOT = os.environ.get("KUHI_ROOT", "/content/kuhi-anime-api")
 if KUHI_ROOT not in sys.path:
     sys.path.insert(0, KUHI_ROOT)
 
-from fastapi.responses import HTMLResponse
+from fastapi import HTTPException, Query
+from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from src.main import app
+
+
+DOWNLOAD_DIR = Path(
+    os.environ.get("DOWNLOAD_DIR", "/content/downloads")
+).resolve()
+THUMB_DIR = DOWNLOAD_DIR / ".thumbnails"
+
+DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+THUMB_DIR.mkdir(parents=True, exist_ok=True)
+
+app.mount(
+    "/download-files",
+    StaticFiles(directory=str(DOWNLOAD_DIR)),
+    name="download-files",
+)
+
+VIDEO_EXTENSIONS = {
+    ".mp4",
+    ".m4v",
+    ".webm",
+    ".mkv",
+    ".mov",
+}
+
+
+def _safe_download_path(relative_path: str) -> Path:
+    candidate = (DOWNLOAD_DIR / relative_path).resolve()
+
+    if DOWNLOAD_DIR not in candidate.parents and candidate != DOWNLOAD_DIR:
+        raise HTTPException(status_code=400, detail="invalid path")
+
+    return candidate
+
+
+def _video_files() -> list[Path]:
+    files = []
+
+    for path in DOWNLOAD_DIR.rglob("*"):
+        if not path.is_file():
+            continue
+
+        if THUMB_DIR in path.parents:
+            continue
+
+        if path.suffix.lower() not in VIDEO_EXTENSIONS:
+            continue
+
+        if path.name.endswith(".part"):
+            continue
+
+        if path.stat().st_size <= 0:
+            continue
+
+        files.append(path)
+
+    files.sort(
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    return files
+
+
+@app.get("/library")
+async def library() -> dict:
+    items = []
+
+    for path in _video_files():
+        relative = path.relative_to(DOWNLOAD_DIR).as_posix()
+        stat = path.stat()
+
+        items.append(
+            {
+                "name": path.name,
+                "relativePath": relative,
+                "size": stat.st_size,
+                "mtime": stat.st_mtime,
+                "videoUrl": "/download-files/" + quote(relative),
+                "thumbnailUrl": "/library/thumbnail?path=" + quote(relative),
+            }
+        )
+
+    return {"items": items}
+
+
+@app.get("/library/thumbnail")
+async def library_thumbnail(
+    path: str = Query(...),
+):
+    video_path = _safe_download_path(path)
+
+    if not video_path.is_file():
+        raise HTTPException(status_code=404, detail="video not found")
+
+    thumb_name = (
+        str(abs(hash(video_path.as_posix())))
+        + "_"
+        + str(video_path.stat().st_mtime_ns)
+        + ".jpg"
+    )
+    thumb_path = THUMB_DIR / thumb_name
+
+    if not thumb_path.exists():
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-ss",
+                "5",
+                "-i",
+                str(video_path),
+                "-frames:v",
+                "1",
+                "-vf",
+                "scale=320:-2",
+                "-q:v",
+                "3",
+                str(thumb_path),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        if result.returncode != 0 or not thumb_path.exists():
+            raise HTTPException(
+                status_code=500,
+                detail="thumbnail generation failed",
+            )
+
+    return FileResponse(
+        thumb_path,
+        media_type="image/jpeg",
+    )
 
 
 @app.get("/viewer", response_class=HTMLResponse)
@@ -19,178 +155,227 @@ async def viewer() -> str:
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Kuhi Colab Viewer</title>
-<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+<title>Downloaded Anime Viewer</title>
 <style>
-body{font-family:system-ui,sans-serif;margin:0;background:#111;color:#eee}
-main{max-width:1100px;margin:auto;padding:24px}
-.controls{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:20px}
-input,select,button{padding:10px;border-radius:8px;border:1px solid #444;background:#1d1d1d;color:#eee}
-input[type=text]{min-width:280px}
-button{cursor:pointer}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:14px}
-.card{background:#1a1a1a;border:1px solid #333;border-radius:10px;overflow:hidden;cursor:pointer}
-.card img{width:100%;aspect-ratio:2/3;object-fit:cover;display:block}
-.card .txt{padding:9px;font-size:13px}
-.card small{color:#aaa}
-.player{margin-top:24px}
-video{width:100%;max-height:70vh;background:#000}
-#status{white-space:pre-wrap;color:#bbb;margin:12px 0}
+body{
+  font-family:system-ui,sans-serif;
+  margin:0;
+  background:#111;
+  color:#eee;
+}
+main{
+  max-width:1200px;
+  margin:auto;
+  padding:24px;
+}
+.controls{
+  display:flex;
+  gap:8px;
+  flex-wrap:wrap;
+  margin-bottom:18px;
+}
+input,button{
+  padding:10px;
+  border-radius:8px;
+  border:1px solid #444;
+  background:#1d1d1d;
+  color:#eee;
+}
+input{
+  min-width:320px;
+  flex:1;
+}
+button{
+  cursor:pointer;
+}
+#status{
+  color:#aaa;
+  margin:10px 0 18px;
+}
+.grid{
+  display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(180px,1fr));
+  gap:14px;
+}
+.card{
+  background:#1a1a1a;
+  border:1px solid #333;
+  border-radius:10px;
+  overflow:hidden;
+  cursor:pointer;
+}
+.card:hover{
+  border-color:#666;
+}
+.card img{
+  width:100%;
+  aspect-ratio:16/9;
+  object-fit:cover;
+  display:block;
+  background:#222;
+}
+.card .txt{
+  padding:10px;
+  font-size:13px;
+  word-break:break-all;
+}
+.card small{
+  color:#999;
+}
+.player{
+  margin-top:26px;
+}
+.player h2{
+  font-size:16px;
+  font-weight:600;
+  word-break:break-all;
+}
+video{
+  width:100%;
+  max-height:75vh;
+  background:#000;
+}
+.empty{
+  color:#999;
+  border:1px dashed #444;
+  border-radius:10px;
+  padding:28px;
+}
 </style>
 </head>
 <body>
 <main>
-<h1>Kuhi Anime Viewer</h1>
+<h1>Downloaded Anime Viewer</h1>
+
 <div class="controls">
-  <input id="query" type="text" placeholder="애니 제목 검색">
-  <button onclick="searchAnime()">검색</button>
+  <input
+    id="query"
+    type="text"
+    placeholder="다운로드된 파일명 검색"
+    oninput="renderLibrary()"
+  >
+  <button onclick="loadLibrary()">새로고침</button>
 </div>
+
 <div id="status"></div>
 <div id="results" class="grid"></div>
 
 <div class="player">
-  <div class="controls">
-    <input id="selected" type="text" placeholder="AniList ID" readonly>
-    <input id="episode" type="number" value="1" min="1">
-    <select id="audio"><option value="sub">sub</option><option value="dub">dub</option></select>
-    <input id="provider" type="text" placeholder="provider (선택)">
-    <button onclick="playSelected()">재생</button>
-  </div>
-  <video id="video" controls></video>
+  <h2 id="playingTitle">선택된 파일 없음</h2>
+  <video id="video" controls preload="metadata"></video>
 </div>
 </main>
+
 <script>
-let hls = null;
-let playToken = 0;
+let libraryItems=[];
 
-const PROVIDERS = [
-  "anineko", "anizone", "anikoto", "reanime", "aniwaves",
-  "kaa", "anibd", "animegg", "mkissa", "animeonsen"
-];
+function humanSize(bytes){
+  const units=["B","KB","MB","GB"];
+  let value=Number(bytes||0);
+  let unit=0;
 
-function titleOf(item){
-  const t=item.title||{};
-  return t.english || t.romaji || t.native || String(item.id);
-}
-
-async function searchAnime(){
-  const q=document.getElementById("query").value.trim();
-  if(!q) return;
-  const status=document.getElementById("status");
-  status.textContent="검색 중...";
-  const r=await fetch("/anime/search?query="+encodeURIComponent(q)+"&per_page=20");
-  const data=await r.json();
-  const root=document.getElementById("results");
-  root.innerHTML="";
-  for(const item of (data.results||[])){
-    const card=document.createElement("div");
-    card.className="card";
-    const cover=((item.coverImage||{}).large)||"";
-    card.innerHTML='<img src="'+cover+'"><div class="txt"><b>'+titleOf(item)+'</b><br><small>AniList '+item.id+'</small></div>';
-    card.onclick=()=>{
-      document.getElementById("selected").value=item.id;
-      status.textContent="선택: "+titleOf(item)+" ("+item.id+")";
-    };
-    root.appendChild(card);
+  while(value>=1024 && unit<units.length-1){
+    value/=1024;
+    unit+=1;
   }
-  status.textContent=(data.results||[]).length+"개 검색됨";
+
+  return value.toFixed(unit===0 ? 0 : 1)+" "+units[unit];
 }
 
-async function tryStream(data, token){
-  const streams=(data.streams||[]).filter(
-    s => s.type==="hls" || s.type==="mp4" || s.type==="dash" || String(s.url||"").includes(".m3u8")
-  );
-  if(!streams.length) return false;
-
-  const s=streams[0];
+function playItem(item){
   const video=document.getElementById("video");
-  const status=document.getElementById("status");
+  const title=document.getElementById("playingTitle");
 
-  if(hls){hls.destroy();hls=null;}
-  video.removeAttribute("src");
+  title.textContent=item.name;
+  video.src=item.videoUrl;
   video.load();
+  video.play().catch(()=>{});
 
-  return await new Promise((resolve)=>{
-    let settled=false;
-    const finish=(ok)=>{
-      if(settled) return;
-      settled=true;
-      clearTimeout(timer);
-      resolve(ok);
-    };
-
-    const timer=setTimeout(()=>finish(false),12000);
-
-    video.onloadedmetadata=()=>{
-      if(token!==playToken) return finish(false);
-      status.textContent="재생 중 | provider: "+(data.provider||"?")+" | stream: "+(s.server||s.type||"?");
-      video.play().catch(()=>{});
-      finish(true);
-    };
-    video.onerror=()=>finish(false);
-
-    if(s.type==="hls" || String(s.url).includes(".m3u8")){
-      const referer=s.referer || new URL(s.url).origin + "/";
-      const playUrl="/proxy_m3u8?url="+encodeURIComponent(s.url)+"&referer="+encodeURIComponent(referer);
-
-      if(Hls.isSupported()){
-        hls=new Hls();
-        hls.on(Hls.Events.ERROR,(_event,err)=>{
-          if(err && err.fatal) finish(false);
-        });
-        hls.loadSource(playUrl);
-        hls.attachMedia(video);
-      }else{
-        video.src=playUrl;
-      }
-    }else{
-      video.src=s.url;
-    }
+  window.scrollTo({
+    top:document.body.scrollHeight,
+    behavior:"smooth",
   });
 }
 
-async function playSelected(){
-  const id=document.getElementById("selected").value.trim();
-  const ep=document.getElementById("episode").value;
-  const audio=document.getElementById("audio").value;
-  const requested=document.getElementById("provider").value.trim();
+function renderLibrary(){
+  const query=document
+    .getElementById("query")
+    .value
+    .trim()
+    .toLowerCase();
+
+  const root=document.getElementById("results");
   const status=document.getElementById("status");
-  if(!id){status.textContent="검색 결과에서 작품을 먼저 선택하세요.";return;}
 
-  const token=++playToken;
-  const candidates=requested ? [requested] : [null,...PROVIDERS];
-  const tried=new Set();
+  const filtered=libraryItems.filter(
+    item=>item.name.toLowerCase().includes(query)
+  );
 
-  for(const provider of candidates){
-    if(token!==playToken) return;
+  root.innerHTML="";
 
-    let url="/anime/extract/"+encodeURIComponent(id)+"?e="+encodeURIComponent(ep)+"&type="+encodeURIComponent(audio);
-    if(provider) url+="&provider="+encodeURIComponent(provider);
-
-    status.textContent=(provider ? provider : "자동")+" 스트림 추출 중...";
-
-    let r;
-    let data;
-    try{
-      r=await fetch(url);
-      data=await r.json();
-    }catch(_e){
-      continue;
-    }
-
-    if(!r.ok) continue;
-
-    const actual=data.provider||provider||"unknown";
-    if(tried.has(actual)) continue;
-    tried.add(actual);
-
-    status.textContent=actual+" 재생 확인 중...";
-    const ok=await tryStream(data,token);
-    if(ok) return;
+  if(!filtered.length){
+    root.innerHTML=
+      '<div class="empty">조건에 맞는 다운로드 영상이 없습니다.</div>';
+    status.textContent=
+      libraryItems.length+
+      "개 다운로드 파일 중 "+
+      filtered.length+
+      "개 표시";
+    return;
   }
 
-  status.textContent="재생 가능한 provider를 찾지 못했습니다.";
+  for(const item of filtered){
+    const card=document.createElement("div");
+    card.className="card";
+
+    const img=document.createElement("img");
+    img.src=item.thumbnailUrl;
+    img.loading="lazy";
+    img.alt=item.name;
+
+    const txt=document.createElement("div");
+    txt.className="txt";
+
+    const name=document.createElement("b");
+    name.textContent=item.name;
+
+    const meta=document.createElement("small");
+    meta.textContent=humanSize(item.size);
+
+    txt.appendChild(name);
+    txt.appendChild(document.createElement("br"));
+    txt.appendChild(meta);
+
+    card.appendChild(img);
+    card.appendChild(txt);
+    card.onclick=()=>playItem(item);
+
+    root.appendChild(card);
+  }
+
+  status.textContent=
+    libraryItems.length+
+    "개 다운로드 파일 중 "+
+    filtered.length+
+    "개 표시";
 }
+
+async function loadLibrary(){
+  const status=document.getElementById("status");
+  status.textContent="다운로드 폴더 확인 중...";
+
+  try{
+    const response=await fetch("/library");
+    const data=await response.json();
+
+    libraryItems=data.items||[];
+    renderLibrary();
+  }catch(error){
+    status.textContent="다운로드 목록을 불러오지 못했습니다.";
+  }
+}
+
+loadLibrary();
 </script>
 </body>
 </html>"""
