@@ -5,6 +5,7 @@ from typing import Any
 
 import requests
 from yt_dlp import YoutubeDL
+from yt_dlp.utils import DownloadError
 
 
 class KuhiClient:
@@ -15,6 +16,14 @@ class KuhiClient:
         response = requests.get(
             f"{self.base_url}/anime/search",
             params={"query": query, "page": page, "per_page": per_page},
+            timeout=30,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def providers_status(self) -> dict[str, Any]:
+        response = requests.get(
+            f"{self.base_url}/anime/providers/status",
             timeout=30,
         )
         response.raise_for_status()
@@ -42,19 +51,26 @@ class KuhiClient:
         response.raise_for_status()
         return response.json()
 
-    def download(
+    def _download_stream(
         self,
         extract_result: dict[str, Any],
         output_path: str,
         stream_index: int = 0,
     ) -> Path:
         streams = extract_result.get("streams") or []
-        if not streams:
-            raise RuntimeError("추출된 stream이 없습니다.")
-        if stream_index < 0 or stream_index >= len(streams):
-            raise IndexError("stream_index가 streams 범위를 벗어났습니다.")
+        downloadable_streams = [
+            stream
+            for stream in streams
+            if stream.get("type") in {"hls", "mp4", "dash"}
+        ]
 
-        stream = streams[stream_index]
+        if not downloadable_streams:
+            raise RuntimeError("다운로드 가능한 hls/mp4/dash stream이 없습니다.")
+
+        if stream_index < 0 or stream_index >= len(downloadable_streams):
+            raise IndexError("stream_index가 다운로드 가능한 streams 범위를 벗어났습니다.")
+
+        stream = downloadable_streams[stream_index]
         stream_url = stream.get("url")
         if not stream_url:
             raise RuntimeError("선택한 stream에 URL이 없습니다.")
@@ -78,3 +94,81 @@ class KuhiClient:
             ydl.download([stream_url])
 
         return output
+
+    def download(
+        self,
+        extract_result: dict[str, Any],
+        output_path: str,
+        stream_index: int = 0,
+        retry_other_providers: bool = True,
+    ) -> Path:
+        current_provider = extract_result.get("provider")
+
+        try:
+            return self._download_stream(
+                extract_result,
+                output_path=output_path,
+                stream_index=stream_index,
+            )
+        except (DownloadError, RuntimeError) as first_error:
+            if not retry_other_providers:
+                raise
+
+            anilist_id = extract_result.get("anilistId")
+            episode = extract_result.get("episode", 1)
+            audio = extract_result.get("type", "sub")
+
+            if not anilist_id:
+                raise first_error
+
+            ranking = self.providers_status().get("ranking") or []
+            attempted = {current_provider} if current_provider else set()
+            last_error: Exception = first_error
+
+            print(
+                f"[fallback] {current_provider or 'unknown'} 다운로드 실패. "
+                "다른 provider를 순서대로 시도합니다."
+            )
+
+            for provider in ranking:
+                if provider in attempted:
+                    continue
+
+                attempted.add(provider)
+
+                try:
+                    candidate = self.extract(
+                        anilist_id,
+                        episode=episode,
+                        audio=audio,
+                        provider=provider,
+                    )
+                except requests.RequestException as error:
+                    last_error = error
+                    print(f"[fallback] {provider}: extract 실패")
+                    continue
+
+                actual_provider = candidate.get("provider")
+                if actual_provider in attempted and actual_provider != provider:
+                    continue
+
+                if actual_provider:
+                    attempted.add(actual_provider)
+
+                try:
+                    print(
+                        f"[fallback] {provider}: "
+                        f"실제 provider={actual_provider or provider} 다운로드 시도"
+                    )
+                    return self._download_stream(
+                        candidate,
+                        output_path=output_path,
+                        stream_index=stream_index,
+                    )
+                except (DownloadError, RuntimeError) as error:
+                    last_error = error
+                    print(f"[fallback] {actual_provider or provider}: 다운로드 실패")
+
+            raise RuntimeError(
+                "사용 가능한 provider에서 모두 다운로드에 실패했습니다."
+            ) from last_error
