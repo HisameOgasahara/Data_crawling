@@ -23,7 +23,7 @@ pip install opencv-python manga-ocr pillow
 python local_roi_ocr.py "D:\\video\\hbr.mp4"
 ```
 
-영상이 큰 경우 기본적으로 가로 1280px에 맞춰 축소해서 표시합니다. 원본 영상은 축소하지 않으며 OCR도 원본 해상도의 ROI를 사용합니다.
+영상이 큰 경우 기본적으로 가로 1280px에 맞춰 축소해서 표시합니다. 원본 영상은 축소하지 않으며 OCR도 원본 해상도의 ROI를 사용합니다. speaker/dialogue ROI는 수동 지정하지 않고 OpenCV로 매 프레임 자동 검출합니다.
 
 ```bash
 python local_roi_ocr.py "D:\\video\\hbr.mp4" --width 960
