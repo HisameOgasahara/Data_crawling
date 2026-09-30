@@ -449,91 +449,97 @@ def detect_text_rois(
         )
 
     height, width = frame.shape[:2]
-
     panel_x, panel_y, panel_w, panel_h = panel_box
 
     white_mask = make_white_text_mask(
         frame
     )
 
-    dialogue_search = (
-        int(round(width * 0.08)),
-        panel_y + int(round(panel_h * 0.05)),
-        int(round(width * 0.84)),
-        int(round(panel_h * 0.88)),
-    )
-
-    dialogue_lines = find_line_boxes(
+    # There is only ONE dialogue region.
+    # Once the bottom dialogue panel is found, the dialogue ROI is a
+    # deterministic inner rectangle of that panel instead of being rebuilt
+    # from individual text-line contours.
+    dialogue_roi = clamp_box(
         frame,
-        white_mask,
-        dialogue_search,
-        min_width_ratio=0.06,
-        max_width_ratio=0.84,
-        min_height_ratio=0.018,
-        max_height_ratio=0.075,
-    )
-
-    dialogue_text_box = union_boxes(
-        dialogue_lines
-    )
-
-    dialogue_roi = None
-
-    if dialogue_text_box is not None:
-        dialogue_roi = expand_box(
-            frame,
-            dialogue_text_box,
-            pad_x=int(round(width * 0.025)),
-            pad_y=int(round(height * 0.018)),
-        )
-
-    name_search = (
-        int(round(width * 0.025)),
-        max(
-            0,
-            panel_y - int(round(height * 0.105)),
+        (
+            int(round(width * 0.12)),
+            panel_y + int(round(panel_h * 0.06)),
+            int(round(width * 0.80)),
+            int(round(panel_h * 0.82)),
         ),
-        int(round(width * 0.24)),
-        int(round(height * 0.125)),
     )
 
-    name_lines = find_line_boxes(
+    # Speaker name is always immediately ABOVE the dialogue panel
+    # and restricted to the left side. It can never become larger than
+    # this search region.
+    name_search = clamp_box(
         frame,
-        white_mask,
-        name_search,
-        min_width_ratio=0.025,
-        max_width_ratio=0.20,
-        min_height_ratio=0.018,
-        max_height_ratio=0.070,
-    )
-
-    speaker_text_box = None
-
-    if name_lines:
-        speaker_text_box = max(
-            name_lines,
-            key=lambda box: (
-                box[2]
-                * box[3]
+        (
+            int(round(width * 0.025)),
+            max(
+                0,
+                panel_y - int(round(height * 0.115)),
             ),
-        )
+            int(round(width * 0.22)),
+            int(round(height * 0.105)),
+        ),
+    )
 
     speaker_roi = None
 
-    if speaker_text_box is not None:
-        speaker_roi = expand_box(
+    if name_search is not None:
+        name_lines = find_line_boxes(
             frame,
-            speaker_text_box,
-            pad_x=int(round(width * 0.018)),
-            pad_y=int(round(height * 0.012)),
+            white_mask,
+            name_search,
+            min_width_ratio=0.020,
+            max_width_ratio=0.18,
+            min_height_ratio=0.018,
+            max_height_ratio=0.070,
         )
+
+        if name_lines:
+            # Pick one name line only; do not union unrelated white regions.
+            best_name_box = max(
+                name_lines,
+                key=lambda box: box[2] * box[3],
+            )
+
+            speaker_roi = expand_box(
+                frame,
+                best_name_box,
+                pad_x=int(round(width * 0.012)),
+                pad_y=int(round(height * 0.010)),
+            )
+
+            # Hard constraint: speaker ROI must stay inside name_search
+            # and strictly above dialogue panel.
+            nx, ny, nw, nh = name_search
+            sx, sy, sw, sh = speaker_roi
+
+            sx1 = max(sx, nx)
+            sy1 = max(sy, ny)
+            sx2 = min(sx + sw, nx + nw)
+            sy2 = min(
+                sy + sh,
+                panel_y,
+            )
+
+            if sx2 > sx1 and sy2 > sy1:
+                speaker_roi = (
+                    sx1,
+                    sy1,
+                    sx2 - sx1,
+                    sy2 - sy1,
+                )
+            else:
+                speaker_roi = None
 
     return (
         speaker_roi,
         dialogue_roi,
         white_mask,
     )
-
 
 def prepare_ocr_image(crop_bgr):
     gray = cv2.cvtColor(
