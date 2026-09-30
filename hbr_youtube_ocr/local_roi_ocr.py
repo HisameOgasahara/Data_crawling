@@ -12,10 +12,11 @@ import numpy as np
 
 WINDOW_NAME = "HBR text mask"
 
-# The UI position is almost fixed.
-# Detection is performed ONLY inside these grayscale search zones.
-NAME_SEARCH_RATIO = (0.02, 0.56, 0.28, 0.70)
-DIALOGUE_SEARCH_RATIO = (0.10, 0.67, 0.94, 0.92)
+# HBR dialogue UI is almost fixed vertically.
+# First detect whether the dark bottom dialogue panel exists from the
+# grayscale brightness drop across a wide horizontal band.
+PANEL_TOP_SEARCH_RATIO = (0.56, 0.80)
+NAME_X_RANGE_RATIO = (0.02, 0.28)
 
 
 def parse_args() -> argparse.Namespace:
@@ -338,23 +339,120 @@ def detect_text_box_in_zone(
     )
 
 
-def detect_rois(frame):
-    gray, mask = make_grayscale_text_mask(frame)
+def detect_dialogue_panel_top(gray):
+    height, width = gray.shape[:2]
 
-    name_search = ratio_box(
-        frame,
-        NAME_SEARCH_RATIO,
+    y_start = int(round(height * PANEL_TOP_SEARCH_RATIO[0]))
+    y_end = int(round(height * PANEL_TOP_SEARCH_RATIO[1]))
+
+    x1 = int(round(width * 0.08))
+    x2 = int(round(width * 0.92))
+
+    band = gray[
+        y_start:y_end,
+        x1:x2,
+    ].astype(np.float32)
+
+    radius = max(
+        4,
+        int(round(height * 0.006)),
     )
 
-    dialogue_search = ratio_box(
-        frame,
-        DIALOGUE_SEARCH_RATIO,
+    best_y = None
+    best_score = -1.0
+    best_coverage = 0.0
+    best_drop = 0.0
+
+    for local_y in range(
+        radius,
+        band.shape[0] - radius,
+    ):
+        above = band[
+            local_y - radius : local_y,
+            :
+        ].mean(axis=0)
+
+        below = band[
+            local_y : local_y + radius,
+            :
+        ].mean(axis=0)
+
+        drop = above - below
+
+        positive = drop > 0.0
+        mean_drop = float(
+            drop[positive].mean()
+            if np.any(positive)
+            else 0.0
+        )
+
+        coverage = float(
+            np.mean(
+                drop >= 8.0
+            )
+        )
+
+        score = (
+            mean_drop
+            * coverage
+        )
+
+        if score > best_score:
+            best_score = score
+            best_y = y_start + local_y
+            best_coverage = coverage
+            best_drop = mean_drop
+
+    # A real dialogue panel causes a broad horizontal darkening.
+    if (
+        best_y is None
+        or best_coverage < 0.45
+        or best_drop < 9.0
+        or best_score < 4.5
+    ):
+        return (
+            None,
+            best_score,
+            best_coverage,
+            best_drop,
+        )
+
+    return (
+        best_y,
+        best_score,
+        best_coverage,
+        best_drop,
+    )
+
+
+def detect_name_box(
+    frame,
+    mask,
+    panel_top,
+):
+    height, width = frame.shape[:2]
+
+    x1 = int(round(width * NAME_X_RANGE_RATIO[0]))
+    x2 = int(round(width * NAME_X_RANGE_RATIO[1]))
+
+    name_height = int(round(height * 0.115))
+    y1 = max(
+        0,
+        panel_top - name_height,
+    )
+    y2 = panel_top
+
+    search_box = (
+        x1,
+        y1,
+        x2 - x1,
+        y2 - y1,
     )
 
     name_box = detect_text_box_in_zone(
         frame,
         mask,
-        name_search,
+        search_box,
         min_width_ratio=0.020,
         max_width_ratio=0.20,
         min_height_ratio=0.018,
@@ -363,36 +461,81 @@ def detect_rois(frame):
         vertical_gap_ratio=0.020,
     )
 
-    dialogue_box = detect_text_box_in_zone(
-        frame,
-        mask,
-        dialogue_search,
-        min_width_ratio=0.060,
-        max_width_ratio=0.84,
-        min_height_ratio=0.018,
-        max_height_ratio=0.080,
-        horizontal_close_ratio=0.012,
-        vertical_gap_ratio=0.045,
+    if name_box is None:
+        return None
+
+    nx, ny, nw, nh = name_box
+
+    # Hard constraints: name must stay completely above the dialogue panel
+    # and remain a compact left-side box.
+    if ny + nh > panel_top:
+        return None
+
+    if nx + nw > x2:
+        return None
+
+    if nw > int(round(width * 0.24)):
+        return None
+
+    return name_box
+
+
+def detect_rois(frame):
+    gray, mask = make_grayscale_text_mask(
+        frame
     )
 
-    # Strict relation: name must be above dialogue.
-    if (
-        name_box is None
-        or dialogue_box is None
-        or name_box[1] + name_box[3] > dialogue_box[1]
-    ):
-        name_box = None
+    (
+        panel_top,
+        panel_score,
+        panel_coverage,
+        panel_drop,
+    ) = detect_dialogue_panel_top(
+        gray
+    )
+
+    # No dark bottom panel => no dialogue UI at all.
+    if panel_top is None:
+        return (
+            gray,
+            mask,
+            None,
+            None,
+            panel_score,
+            panel_coverage,
+            panel_drop,
+        )
+
+    height, width = frame.shape[:2]
+
+    # Dialogue box is the entire bottom panel, from detected top edge
+    # all the way to the bottom of the frame.
+    dialogue_box = (
+        0,
+        panel_top,
+        width,
+        height - panel_top,
+    )
+
+    name_box = detect_name_box(
+        frame,
+        mask,
+        panel_top,
+    )
+
+    # In this UI the name box and dialogue box appear together.
+    if name_box is None:
         dialogue_box = None
 
     return (
         gray,
         mask,
-        name_search,
-        dialogue_search,
         name_box,
         dialogue_box,
+        panel_score,
+        panel_coverage,
+        panel_drop,
     )
-
 
 def prepare_ocr_image(crop_bgr):
     gray = cv2.cvtColor(
@@ -488,10 +631,11 @@ def main():
         (
             gray,
             mask,
-            name_search,
-            dialogue_search,
             name_box,
             dialogue_box,
+            panel_score,
+            panel_coverage,
+            panel_drop,
         ) = detect_rois(
             frame
         )
@@ -505,22 +649,6 @@ def main():
         display, scale = resize_for_display(
             debug,
             args.width,
-        )
-
-        draw_box(
-            display,
-            name_search,
-            scale,
-            "name-search",
-            (0, 180, 180),
-        )
-
-        draw_box(
-            display,
-            dialogue_search,
-            scale,
-            "dialogue-search",
-            (180, 180, 0),
         )
 
         draw_box(
@@ -560,7 +688,8 @@ def main():
             display,
             (
                 f"{current_sec:.2f}/{duration_sec:.2f}s  "
-                f"{'PAUSE' if paused else 'PLAY'}"
+                f"{'PAUSE' if paused else 'PLAY'}  "
+                f"panel={panel_score:.1f} cov={panel_coverage:.2f} drop={panel_drop:.1f}"
             ),
             (20, 30),
             cv2.FONT_HERSHEY_SIMPLEX,
