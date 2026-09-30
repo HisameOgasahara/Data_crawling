@@ -730,6 +730,141 @@ def detect_boxes(frame):
         panel_drop,
     )
 
+def stabilize_boxes(
+    frame,
+    candidate_name_box,
+    candidate_dialogue_box,
+    previous_name_box,
+    previous_dialogue_box,
+):
+    """
+    Apply weak temporal constraints from the previous valid frame.
+
+    Dialogue:
+    - x and width are fixed to the frame
+    - only panel_top(y) may move
+    - panel_top is allowed to move only a little per frame
+
+    Name:
+    - stays in nearly the same left-side location
+    - x/y/height are strongly constrained
+    - width may change more because character-name length changes
+    """
+    height, width = frame.shape[:2]
+
+    if candidate_dialogue_box is None:
+        return (
+            None,
+            None,
+        )
+
+    _, candidate_y, _, _ = candidate_dialogue_box
+
+    if previous_dialogue_box is not None:
+        _, previous_y, _, _ = previous_dialogue_box
+
+        max_y_move = int(round(height * 0.025))
+
+        if abs(candidate_y - previous_y) > max_y_move:
+            candidate_y = previous_y
+        else:
+            candidate_y = int(round(
+                0.75 * previous_y
+                + 0.25 * candidate_y
+            ))
+
+    dialogue_box = (
+        0,
+        candidate_y,
+        width,
+        height - candidate_y,
+    )
+
+    if candidate_name_box is None:
+        if previous_name_box is None:
+            return (
+                None,
+                None,
+            )
+
+        px, py, pw, ph = previous_name_box
+
+        # Keep previous name box only if it still remains fully above
+        # the stabilized dialogue panel.
+        if py + ph <= candidate_y:
+            return (
+                previous_name_box,
+                dialogue_box,
+            )
+
+        return (
+            None,
+            None,
+        )
+
+    nx, ny, nw, nh = candidate_name_box
+
+    if previous_name_box is not None:
+        px, py, pw, ph = previous_name_box
+
+        max_x_move = int(round(width * 0.030))
+        max_y_move = int(round(height * 0.025))
+        max_h_change = int(round(height * 0.025))
+
+        if abs(nx - px) > max_x_move:
+            nx = px
+
+        if abs(ny - py) > max_y_move:
+            ny = py
+
+        if abs(nh - ph) > max_h_change:
+            nh = ph
+
+        # Name width is allowed to vary considerably because names differ
+        # in length, but not arbitrarily.
+        min_w = int(round(pw * 0.45))
+        max_w = int(round(pw * 1.90))
+        nw = min(
+            max(nw, min_w),
+            max_w,
+        )
+
+        nx = int(round(
+            0.75 * px
+            + 0.25 * nx
+        ))
+        ny = int(round(
+            0.75 * py
+            + 0.25 * ny
+        ))
+        nh = int(round(
+            0.75 * ph
+            + 0.25 * nh
+        ))
+
+    # Final hard relation: name box must remain fully above dialogue.
+    if ny + nh > candidate_y:
+        nh = candidate_y - ny
+
+    if nh <= 0:
+        return (
+            None,
+            None,
+        )
+
+    name_box = (
+        nx,
+        ny,
+        nw,
+        nh,
+    )
+
+    return (
+        name_box,
+        dialogue_box,
+    )
+
+
 def prepare_ocr_image(crop_bgr):
     gray = cv2.cvtColor(
         crop_bgr,
@@ -796,6 +931,8 @@ def main():
 
     paused = not args.autoplay
     manga_ocr = None
+    previous_name_box = None
+    previous_dialogue_box = None
 
     cv2.destroyAllWindows()
 
@@ -822,12 +959,33 @@ def main():
 
         (
             mask,
-            name_box,
-            dialogue_box,
+            candidate_name_box,
+            candidate_dialogue_box,
             panel_drop,
         ) = detect_boxes(
             frame
         )
+
+        (
+            name_box,
+            dialogue_box,
+        ) = stabilize_boxes(
+            frame,
+            candidate_name_box,
+            candidate_dialogue_box,
+            previous_name_box,
+            previous_dialogue_box,
+        )
+
+        if (
+            name_box is not None
+            and dialogue_box is not None
+        ):
+            previous_name_box = name_box
+            previous_dialogue_box = dialogue_box
+        elif candidate_dialogue_box is None:
+            previous_name_box = None
+            previous_dialogue_box = None
 
         debug = cv2.cvtColor(
             mask,
