@@ -276,6 +276,7 @@ class KuhiClient:
                         output_path=output_path,
                         stream_index=stream_index,
                         quality=quality,
+                        concurrent_fragments=concurrent_fragments,
                     )
                     self._download_subtitles(
                         candidate,
