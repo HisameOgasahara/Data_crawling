@@ -12,18 +12,12 @@ import numpy as np
 
 WINDOW_NAME = "HBR text mask"
 
-# HBR dialogue UI is almost fixed vertically.
-# First detect whether the dark bottom dialogue panel exists from the
-# grayscale brightness drop across a wide horizontal band.
-PANEL_TOP_SEARCH_RATIO = (0.56, 0.80)
-NAME_X_RANGE_RATIO = (0.02, 0.28)
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Detect HBR name/dialogue text from grayscale only, "
-            "inside fixed UI search zones."
+            "Detect HBR dialogue UI from grayscale only. "
+            "One mask window, one name box, one dialogue box."
         )
     )
     parser.add_argument("video", type=Path, help="Video file path")
@@ -63,23 +57,6 @@ def resize_for_display(frame, target_width: int):
     )
 
     return display, scale
-
-
-def ratio_box(frame, ratio):
-    height, width = frame.shape[:2]
-    x1r, y1r, x2r, y2r = ratio
-
-    x1 = int(round(width * x1r))
-    y1 = int(round(height * y1r))
-    x2 = int(round(width * x2r))
-    y2 = int(round(height * y2r))
-
-    return (
-        x1,
-        y1,
-        x2 - x1,
-        y2 - y1,
-    )
 
 
 def normalize_text(text: str) -> str:
@@ -165,7 +142,11 @@ def crop_from_box(frame, box):
         return None
 
     x, y, w, h = box
-    return frame[y : y + h, x : x + w]
+
+    return frame[
+        y : y + h,
+        x : x + w,
+    ]
 
 
 def draw_box(
@@ -205,13 +186,12 @@ def draw_box(
     )
 
 
-def make_grayscale_text_mask(frame):
+def make_grayscale_mask(frame):
     gray = cv2.cvtColor(
         frame,
         cv2.COLOR_BGR2GRAY,
     )
 
-    # Keep only very bright glyph-like pixels.
     _, mask = cv2.threshold(
         gray,
         185,
@@ -222,294 +202,308 @@ def make_grayscale_text_mask(frame):
     return gray, mask
 
 
-def detect_text_box_in_zone(
-    frame,
-    mask,
-    search_box,
-    min_width_ratio,
-    max_width_ratio,
-    min_height_ratio,
-    max_height_ratio,
-    horizontal_close_ratio,
-    vertical_gap_ratio,
-):
-    height, width = frame.shape[:2]
-
-    sx, sy, sw, sh = search_box
-    region = mask[sy : sy + sh, sx : sx + sw]
-
-    close_kernel = cv2.getStructuringElement(
-        cv2.MORPH_RECT,
-        (
-            max(
-                3,
-                int(round(width * horizontal_close_ratio)),
-            ),
-            3,
-        ),
+def smooth_1d(values, kernel_size):
+    kernel_size = max(
+        1,
+        int(kernel_size),
     )
 
-    connected = cv2.morphologyEx(
-        region,
-        cv2.MORPH_CLOSE,
-        close_kernel,
-        iterations=2,
-    )
+    if kernel_size % 2 == 0:
+        kernel_size += 1
 
-    contours, _ = cv2.findContours(
-        connected,
-        cv2.RETR_EXTERNAL,
-        cv2.CHAIN_APPROX_SIMPLE,
-    )
+    kernel = np.ones(
+        kernel_size,
+        dtype=np.float32,
+    ) / kernel_size
 
-    lines = []
-
-    for contour in contours:
-        x, y, w, h = cv2.boundingRect(contour)
-
-        wr = w / width
-        hr = h / height
-
-        if wr < min_width_ratio or wr > max_width_ratio:
-            continue
-
-        if hr < min_height_ratio or hr > max_height_ratio:
-            continue
-
-        lines.append(
-            (
-                sx + x,
-                sy + y,
-                w,
-                h,
-            )
-        )
-
-    if not lines:
-        return None
-
-    lines.sort(
-        key=lambda box: box[1]
-    )
-
-    groups = []
-    current = [lines[0]]
-
-    max_gap = int(round(height * vertical_gap_ratio))
-
-    for box in lines[1:]:
-        previous = current[-1]
-        previous_bottom = previous[1] + previous[3]
-        gap = box[1] - previous_bottom
-
-        if gap <= max_gap:
-            current.append(box)
-        else:
-            groups.append(current)
-            current = [box]
-
-    groups.append(current)
-
-    best_group = max(
-        groups,
-        key=lambda group: sum(
-            box[2] * box[3]
-            for box in group
-        ),
-    )
-
-    x1 = min(box[0] for box in best_group)
-    y1 = min(box[1] for box in best_group)
-    x2 = max(box[0] + box[2] for box in best_group)
-    y2 = max(box[1] + box[3] for box in best_group)
-
-    pad_x = int(round(width * 0.012))
-    pad_y = int(round(height * 0.010))
-
-    x1 = max(sx, x1 - pad_x)
-    y1 = max(sy, y1 - pad_y)
-    x2 = min(sx + sw, x2 + pad_x)
-    y2 = min(sy + sh, y2 + pad_y)
-
-    return (
-        x1,
-        y1,
-        x2 - x1,
-        y2 - y1,
+    return np.convolve(
+        values,
+        kernel,
+        mode="same",
     )
 
 
-def detect_dialogue_panel_top(gray):
+def detect_panel_top(gray):
+    """
+    Detect the top edge of the bottom translucent dialogue panel.
+
+    We use grayscale only:
+    a real panel produces a broad, horizontal brightness drop.
+    """
     height, width = gray.shape[:2]
 
-    y_start = int(round(height * PANEL_TOP_SEARCH_RATIO[0]))
-    y_end = int(round(height * PANEL_TOP_SEARCH_RATIO[1]))
+    x1 = int(round(width * 0.06))
+    x2 = int(round(width * 0.94))
 
-    x1 = int(round(width * 0.08))
-    x2 = int(round(width * 0.92))
+    y1 = int(round(height * 0.55))
+    y2 = int(round(height * 0.80))
 
     band = gray[
-        y_start:y_end,
+        y1:y2,
         x1:x2,
     ].astype(np.float32)
 
-    radius = max(
-        4,
-        int(round(height * 0.006)),
+    row_mean = band.mean(axis=1)
+
+    row_mean = smooth_1d(
+        row_mean,
+        max(
+            3,
+            int(round(height * 0.008)),
+        ),
+    )
+
+    offset = max(
+        5,
+        int(round(height * 0.018)),
     )
 
     best_y = None
-    best_score = -1.0
-    best_coverage = 0.0
-    best_drop = 0.0
+    best_drop = -1.0
 
     for local_y in range(
-        radius,
-        band.shape[0] - radius,
+        offset,
+        len(row_mean) - offset,
     ):
-        above = band[
-            local_y - radius : local_y,
-            :
-        ].mean(axis=0)
+        above = float(
+            row_mean[
+                local_y - offset : local_y
+            ].mean()
+        )
 
-        below = band[
-            local_y : local_y + radius,
-            :
-        ].mean(axis=0)
+        below = float(
+            row_mean[
+                local_y : local_y + offset
+            ].mean()
+        )
 
         drop = above - below
 
-        positive = drop > 0.0
-        mean_drop = float(
-            drop[positive].mean()
-            if np.any(positive)
-            else 0.0
-        )
+        if drop > best_drop:
+            best_drop = drop
+            best_y = y1 + local_y
 
-        coverage = float(
-            np.mean(
-                drop >= 8.0
+    if best_y is None:
+        return None, 0.0
+
+    # Reject normal scene transitions / furniture edges.
+    # The UI panel darkening is broad and usually much stronger.
+    if best_drop < 8.0:
+        return None, best_drop
+
+    return best_y, best_drop
+
+
+def active_row_groups(
+    mask,
+    search_box,
+    min_white_pixels,
+    max_gap_rows,
+):
+    sx, sy, sw, sh = search_box
+
+    region = mask[
+        sy : sy + sh,
+        sx : sx + sw,
+    ]
+
+    row_counts = np.count_nonzero(
+        region,
+        axis=1,
+    )
+
+    active = row_counts >= min_white_pixels
+
+    # Close tiny vertical gaps inside a text line.
+    active_u8 = active.astype(
+        np.uint8
+    ) * 255
+
+    kernel = np.ones(
+        (
+            max(
+                1,
+                max_gap_rows,
+            ),
+            1,
+        ),
+        dtype=np.uint8,
+    )
+
+    active_closed = cv2.morphologyEx(
+        active_u8.reshape(-1, 1),
+        cv2.MORPH_CLOSE,
+        kernel,
+    ).ravel() > 0
+
+    groups = []
+    start = None
+
+    for index, is_active in enumerate(
+        active_closed
+    ):
+        if is_active and start is None:
+            start = index
+
+        if (
+            not is_active
+            and start is not None
+        ):
+            groups.append(
+                (
+                    start,
+                    index - 1,
+                )
+            )
+            start = None
+
+    if start is not None:
+        groups.append(
+            (
+                start,
+                len(active_closed) - 1,
             )
         )
 
-        score = (
-            mean_drop
-            * coverage
-        )
-
-        if score > best_score:
-            best_score = score
-            best_y = y_start + local_y
-            best_coverage = coverage
-            best_drop = mean_drop
-
-    # A real dialogue panel causes a broad horizontal darkening.
-    if (
-        best_y is None
-        or best_coverage < 0.45
-        or best_drop < 9.0
-        or best_score < 4.5
-    ):
-        return (
-            None,
-            best_score,
-            best_coverage,
-            best_drop,
-        )
-
-    return (
-        best_y,
-        best_score,
-        best_coverage,
-        best_drop,
-    )
+    return groups, row_counts
 
 
-def detect_name_box(
+def text_box_from_group(
     frame,
     mask,
-    panel_top,
+    search_box,
+    row_group,
+    pad_x_ratio,
+    pad_y_ratio,
 ):
     height, width = frame.shape[:2]
+    sx, sy, sw, sh = search_box
+    row_start, row_end = row_group
 
-    x1 = int(round(width * NAME_X_RANGE_RATIO[0]))
-    x2 = int(round(width * NAME_X_RANGE_RATIO[1]))
+    y1 = sy + row_start
+    y2 = sy + row_end + 1
 
-    name_height = int(round(height * 0.115))
-    y1 = max(
-        0,
-        panel_top - name_height,
+    strip = mask[
+        y1:y2,
+        sx : sx + sw,
+    ]
+
+    ys, xs = np.where(
+        strip > 0
     )
-    y2 = panel_top
 
-    search_box = (
+    if len(xs) == 0:
+        return None
+
+    x1 = sx + int(xs.min())
+    x2 = sx + int(xs.max()) + 1
+
+    pad_x = int(round(
+        width * pad_x_ratio
+    ))
+    pad_y = int(round(
+        height * pad_y_ratio
+    ))
+
+    x1 = max(
+        sx,
+        x1 - pad_x,
+    )
+    x2 = min(
+        sx + sw,
+        x2 + pad_x,
+    )
+
+    y1 = max(
+        sy,
+        y1 - pad_y,
+    )
+    y2 = min(
+        sy + sh,
+        y2 + pad_y,
+    )
+
+    return (
         x1,
         y1,
         x2 - x1,
         y2 - y1,
     )
 
-    name_box = detect_text_box_in_zone(
-        frame,
-        mask,
-        search_box,
-        min_width_ratio=0.020,
-        max_width_ratio=0.20,
-        min_height_ratio=0.018,
-        max_height_ratio=0.070,
-        horizontal_close_ratio=0.008,
-        vertical_gap_ratio=0.020,
-    )
 
-    if name_box is None:
-        return None
-
-    nx, ny, nw, nh = name_box
-
-    # Hard constraints: name must stay completely above the dialogue panel
-    # and remain a compact left-side box.
-    if ny + nh > panel_top:
-        return None
-
-    if nx + nw > x2:
-        return None
-
-    if nw > int(round(width * 0.24)):
-        return None
-
-    return name_box
-
-
-def detect_rois(frame):
-    gray, mask = make_grayscale_text_mask(
+def detect_boxes(frame):
+    gray, mask = make_grayscale_mask(
         frame
     )
 
-    (
-        panel_top,
-        panel_score,
-        panel_coverage,
-        panel_drop,
-    ) = detect_dialogue_panel_top(
+    height, width = frame.shape[:2]
+
+    panel_top, panel_drop = detect_panel_top(
         gray
     )
 
-    # No dark bottom panel => no dialogue UI at all.
     if panel_top is None:
         return (
-            gray,
             mask,
             None,
             None,
-            panel_score,
-            panel_coverage,
             panel_drop,
         )
 
-    height, width = frame.shape[:2]
+    # Dialogue evidence must exist inside the panel.
+    dialogue_search = (
+        int(round(width * 0.09)),
+        panel_top,
+        int(round(width * 0.84)),
+        height - panel_top,
+    )
 
-    # Dialogue box is the entire bottom panel, from detected top edge
-    # all the way to the bottom of the frame.
+    dialogue_groups, dialogue_counts = active_row_groups(
+        mask,
+        dialogue_search,
+        min_white_pixels=max(
+            24,
+            int(round(width * 0.018)),
+        ),
+        max_gap_rows=max(
+            2,
+            int(round(height * 0.010)),
+        ),
+    )
+
+    if not dialogue_groups:
+        return (
+            mask,
+            None,
+            None,
+            panel_drop,
+        )
+
+    # Use all dialogue lines that are close enough vertically.
+    # Final dialogue box is the WHOLE panel down to the bottom,
+    # so long dialogue can never be clipped.
+    dialogue_group = (
+        dialogue_groups[0][0],
+        dialogue_groups[-1][1],
+    )
+
+    dialogue_text_box = text_box_from_group(
+        frame,
+        mask,
+        dialogue_search,
+        dialogue_group,
+        pad_x_ratio=0.02,
+        pad_y_ratio=0.01,
+    )
+
+    if dialogue_text_box is None:
+        return (
+            mask,
+            None,
+            None,
+            panel_drop,
+        )
+
     dialogue_box = (
         0,
         panel_top,
@@ -517,25 +511,87 @@ def detect_rois(frame):
         height - panel_top,
     )
 
-    name_box = detect_name_box(
-        frame,
-        mask,
-        panel_top,
+    # Name must exist directly above the panel, on the left.
+    name_height = int(round(
+        height * 0.12
+    ))
+
+    name_search = (
+        int(round(width * 0.02)),
+        max(
+            0,
+            panel_top - name_height,
+        ),
+        int(round(width * 0.26)),
+        min(
+            name_height,
+            panel_top,
+        ),
     )
 
-    # In this UI the name box and dialogue box appear together.
+    name_groups, name_counts = active_row_groups(
+        mask,
+        name_search,
+        min_white_pixels=max(
+            8,
+            int(round(width * 0.004)),
+        ),
+        max_gap_rows=max(
+            2,
+            int(round(height * 0.006)),
+        ),
+    )
+
+    if not name_groups:
+        return (
+            mask,
+            None,
+            None,
+            panel_drop,
+        )
+
+    # The actual character name is one compact row nearest the panel.
+    name_group = max(
+        name_groups,
+        key=lambda group: group[1],
+    )
+
+    name_box = text_box_from_group(
+        frame,
+        mask,
+        name_search,
+        name_group,
+        pad_x_ratio=0.012,
+        pad_y_ratio=0.010,
+    )
+
     if name_box is None:
-        dialogue_box = None
+        return (
+            mask,
+            None,
+            None,
+            panel_drop,
+        )
+
+    # Hard relation: name box must be completely above dialogue panel.
+    if (
+        name_box[1] + name_box[3]
+        > panel_top
+    ):
+        return (
+            mask,
+            None,
+            None,
+            panel_drop,
+        )
 
     return (
-        gray,
         mask,
         name_box,
         dialogue_box,
-        panel_score,
-        panel_coverage,
         panel_drop,
     )
+
 
 def prepare_ocr_image(crop_bgr):
     gray = cv2.cvtColor(
@@ -575,7 +631,6 @@ def main():
         f"Loaded {len(known_names)} known names from "
         f"{args.names_file}"
     )
-    print("Single-window mode: only 'HBR text mask' will be created.")
 
     cap = cv2.VideoCapture(
         str(args.video)
@@ -629,18 +684,14 @@ def main():
                 frame = next_frame
 
         (
-            gray,
             mask,
             name_box,
             dialogue_box,
-            panel_score,
-            panel_coverage,
             panel_drop,
-        ) = detect_rois(
+        ) = detect_boxes(
             frame
         )
 
-        # Show ONE window only: grayscale/mask composite.
         debug = cv2.cvtColor(
             mask,
             cv2.COLOR_GRAY2BGR,
@@ -689,7 +740,7 @@ def main():
             (
                 f"{current_sec:.2f}/{duration_sec:.2f}s  "
                 f"{'PAUSE' if paused else 'PLAY'}  "
-                f"panel={panel_score:.1f} cov={panel_coverage:.2f} drop={panel_drop:.1f}"
+                f"panel-drop={panel_drop:.1f}"
             ),
             (20, 30),
             cv2.FONT_HERSHEY_SIMPLEX,
@@ -796,7 +847,7 @@ def main():
                 or dialogue_box is None
             ):
                 print(
-                    "No valid name/dialogue pair on this grayscale mask."
+                    "No valid HBR dialogue UI on this frame."
                 )
                 continue
 
