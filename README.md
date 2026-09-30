@@ -17,3 +17,15 @@
 - Google Drive 미사용
 
 노트북: `anime_api/anime_api_colab.ipynb`
+
+## hbr_youtube_ocr
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/HisameOgasahara/Data_crawling/blob/main/hbr_youtube_ocr/hbr_youtube_ocr_colab.ipynb?skip_cache=true)
+
+- CPU Colab 런타임 기준
+- YouTube 영상 다운로드
+- 전체 WAV 오디오 추출
+- OpenCV 고정 ROI + MangaOCR
+- 화자명/대사 timestamp 매칭
+
+노트북: `hbr_youtube_ocr/hbr_youtube_ocr_colab.ipynb`
